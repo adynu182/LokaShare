@@ -8,7 +8,7 @@ import androidx.room.Query
 interface PendingLocationDao {
 
     @Insert
-    suspend fun insert(entity: PendingLocationEntity)
+    suspend fun insert(entity: PendingLocationEntity): Long
 
     @Query("SELECT * FROM pending_locations WHERE status = 'PENDING' ORDER BY localTimestamp ASC")
     suspend fun getAllPending(): List<PendingLocationEntity>

@@ -100,70 +100,43 @@ class TrackingForegroundService : Service() {
         // Penyimpanan sementara untuk semua percobaan
         val allAttempts = mutableListOf<Location>()
         var selectedLoc: Location? = null
-        
-        // ===== TAHAP 1: 10 percobaan dengan target akurasi <= 20m =====
-        Timber.d("=== TAHAP 1: Mencari akurasi <= 20m (10 percobaan) ===")
-        for (attempt in 1..10) {
-            val currentLoc = locationRepo.getCurrentLocation()
+
+        Timber.d("=== TAHAP 1: 5 percobaan dengan prioritas GPS ketat ===")
+        for (attempt in 1..5) {
+            val currentLoc = if (attempt == 1) {
+                locationRepo.getCurrentLocationFromGps()
+            } else {
+                locationRepo.getCurrentLocation()
+            }
+
             if (currentLoc != null) {
                 allAttempts.add(currentLoc)
-                Timber.d("Tahap 1 - Percobaan $attempt: akurasi = ${currentLoc.accuracy}m")
-                
-                // Target utama tahap 1: akurasi <= 20m
-                if (currentLoc.accuracy <= ACCURACY_THRESHOLD) {
+                Timber.d("Percobaan $attempt: akurasi = ${currentLoc.accuracy}m, provider = ${currentLoc.provider}, age = ${System.currentTimeMillis() - currentLoc.time}ms")
+
+                if (attempt == 1) {
+                    if (locationRepo.meetsStrictCriteria(currentLoc)) {
+                        selectedLoc = currentLoc
+                        Timber.d("✓ Percobaan 1 - lokasi GPS memenuhi kriteria ketat")
+                        break
+                    }
+                    Timber.w("Percobaan 1 - lokasi GPS gagal memenuhi kriteria ketat, lanjut ke fallback")
+                } else if (currentLoc.accuracy < 20f) {
                     selectedLoc = currentLoc
-                    Timber.d("✓ Tahap 1 - BERHASIL! Ditemukan akurasi <= 20m pada percobaan ke-$attempt")
+                    Timber.d("✓ Percobaan $attempt - akurasi < 20m, hentikan pencarian")
                     break
                 }
             } else {
-                Timber.w("Tahap 1 - Percobaan $attempt: gagal mendapatkan lokasi")
+                Timber.w("Percobaan $attempt: gagal mendapatkan lokasi")
             }
-            
-            if (attempt < 10) {
-                delay(10_000L) // 10 detik sebelum percobaan berikutnya
-            }
-        }
-        
-        // Jika tahap 1 tidak menemukan <= 20m, cari yang < 100m dari percobaan tahap 1
-        if (selectedLoc == null && allAttempts.isNotEmpty()) {
-            val candidate = allAttempts.firstOrNull { it.accuracy < 100f }
-            if (candidate != null) {
-                selectedLoc = candidate
-                Timber.d("✓ Tahap 1 - Fallback: Ditemukan akurasi < 100m (${candidate.accuracy}m)")
-            } else {
-                Timber.w("✗ Tahap 1 - Tidak ditemukan akurasi < 100m. Lanjut Tahap 2...")
+
+            if (attempt < 5) {
+                delay(5_000L)
             }
         }
-        
-        // ===== TAHAP 2: 10 percobaan lagi dengan target akurasi <= 100m =====
-        if (selectedLoc == null) {
-            Timber.d("=== TAHAP 2: Mencari akurasi <= 100m (10 percobaan) ===")
-            for (attempt in 1..10) {
-                val currentLoc = locationRepo.getCurrentLocation()
-                if (currentLoc != null) {
-                    allAttempts.add(currentLoc)
-                    Timber.d("Tahap 2 - Percobaan $attempt: akurasi = ${currentLoc.accuracy}m")
-                    
-                    // Target tahap 2: akurasi <= 100m
-                    if (currentLoc.accuracy <= 100f) {
-                        selectedLoc = currentLoc
-                        Timber.d("✓ Tahap 2 - BERHASIL! Ditemukan akurasi <= 100m pada percobaan ke-$attempt")
-                        break
-                    }
-                } else {
-                    Timber.w("Tahap 2 - Percobaan $attempt: gagal mendapatkan lokasi")
-                }
-                
-                if (attempt < 10) {
-                    delay(10_000L) // 10 detik sebelum percobaan berikutnya
-                }
-            }
-        }
-        
-        // ===== FALLBACK: Pilih akurasi terbaik dari semua percobaan (tahap 1 + 2) =====
+
         if (selectedLoc == null && allAttempts.isNotEmpty()) {
             selectedLoc = allAttempts.minByOrNull { it.accuracy }
-            Timber.w("✗ Semua tahap gagal. FALLBACK: Menggunakan akurasi terbaik (${selectedLoc?.accuracy}m)")
+            Timber.w("✗ Semua percobaan gagal. FALLBACK: Menggunakan akurasi terbaik (${selectedLoc?.accuracy}m)")
         }
         
         // Jika tidak ada lokasi sama sekali
@@ -233,8 +206,6 @@ class TrackingForegroundService : Service() {
             )
 
             val online = NetworkMonitor.isOnline(this)
-            // Jika pengiriman wajib dan jarak dari posisi terakhir < THRESHOLD_METERS,
-            // kita pilih untuk menimpa (overwrite) dokumen Firestore terakhir jika tersedia.
             var overwriteLastDoc = false
             if (mandatoryDue && lastSent != null) {
                 val (lastLat, lastLng, _) = lastSent
@@ -247,22 +218,19 @@ class TrackingForegroundService : Service() {
                 }
             }
 
+            val roomId = firestoreRepo.saveToRoom(payload)
             val success = if (online) {
-                // Kirim langsung ke Firestore (opsional menimpa dokumen terakhir)
-                val ok = firestoreRepo.sendDirect(payload, overwriteLastDoc)
+                val ok = firestoreRepo.sendDirect(payload, overwriteLastDoc, roomId = roomId)
                 if (ok) {
-                    // Coba sync pending data sekalian
+                    firestoreRepo.markAsSent(roomId)
                     firestoreRepo.syncPendingFromRoom()
                 }
                 ok
             } else {
-                // Simpan ke Room DB
-                firestoreRepo.saveToRoom(payload)
                 true
             }
 
             if (success) {
-                // Simpan state koordinat terkirim HANYA jika aman terkirim/tersimpan
                 prefs.saveLastSentLocation(loc.latitude, loc.longitude, timeNow)
                 if (mandatoryDue) {
                     prefs.saveLastMandatorySent(timeNow)

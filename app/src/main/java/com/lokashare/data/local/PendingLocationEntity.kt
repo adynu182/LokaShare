@@ -16,5 +16,7 @@ data class PendingLocationEntity(
     val battery: Int,
     val isCharging: Boolean,
     val localTimestamp: Long,         // Waktu lokal saat data dibuat
-    val status: String = "PENDING"    // "PENDING" | "SENT"
+    val status: String = "PENDING",  // "PENDING" | "SENT"
+    val eventId: String = "",
+    val clientId: String = ""
 )

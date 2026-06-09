@@ -38,7 +38,7 @@ class FirestoreRepository(private val context: Context) {
     private suspend fun ensureAuthenticated(): Boolean {
         val authInstance = auth ?: return false
         if (authInstance.currentUser != null) return true
-        
+
         return try {
             authInstance.signInAnonymously().await()
             Timber.d("Autentikasi Anonim Berhasil")
@@ -52,10 +52,13 @@ class FirestoreRepository(private val context: Context) {
     /**
      * Kirim data langsung saat online
      */
-    suspend fun sendDirect(payload: LocationDataModel, overwriteLastDoc: Boolean = false): Boolean {
+    suspend fun sendDirect(
+        payload: LocationDataModel,
+        overwriteLastDoc: Boolean = false,
+        roomId: Long? = null
+    ): Boolean {
         if (!isFirebaseAvailable) {
             Timber.w("Firebase tidak terinisialisasi. Menyimpan ke Room.")
-            saveToRoom(payload)
             return false
         }
 
@@ -63,11 +66,11 @@ class FirestoreRepository(private val context: Context) {
             val authenticated = ensureAuthenticated()
             if (!authenticated) {
                 Timber.w("Gagal autentikasi ke Firebase. Menyimpan ke Room.")
-                saveToRoom(payload)
                 return false
             }
 
             val fs = firestore ?: throw IllegalStateException("Firestore unavailable")
+            val docId = roomId?.toString() ?: payload.eventId
 
             if (overwriteLastDoc) {
                 val lastDocId = prefs.getLastSentDocId()
@@ -76,25 +79,22 @@ class FirestoreRepository(private val context: Context) {
                         .document(lastDocId)
                         .set(payload.toFirestoreMap())
                         .await()
+                    prefs.saveLastSentDocId(lastDocId)
                     Timber.d("Data lokasi menimpa dokumen Firestore: $lastDocId")
-                    // keep last doc id
                     return true
                 }
             }
 
-            val docRef = fs.collection("locations")
-                .add(payload.toFirestoreMap())
+            fs.collection("locations")
+                .document(docId)
+                .set(payload.toFirestoreMap())
                 .await()
-            try {
-                prefs.saveLastSentDocId(docRef.id)
-            } catch (e: Exception) {
-                Timber.w(e, "Gagal menyimpan lastDocId ke prefs")
-            }
-            Timber.d("Data lokasi terkirim langsung ke Firestore (docId=${docRef.id})")
+
+            prefs.saveLastSentDocId(docId)
+            Timber.d("Data lokasi terkirim langsung ke Firestore (docId=$docId)")
             true
         } catch (e: Exception) {
-            Timber.e(e, "Gagal mengirim data langsung ke Firestore. Menyimpan ke Room.")
-            saveToRoom(payload)
+            Timber.e(e, "Gagal mengirim data langsung ke Firestore")
             false
         }
     }
@@ -102,8 +102,8 @@ class FirestoreRepository(private val context: Context) {
     /**
      * Simpan data ke antrian lokal (offline queue)
      */
-    suspend fun saveToRoom(payload: LocationDataModel) {
-        try {
+    suspend fun saveToRoom(payload: LocationDataModel): Long {
+        return try {
             val entity = PendingLocationEntity(
                 deviceId = payload.deviceId,
                 userName = payload.userName,
@@ -113,13 +113,25 @@ class FirestoreRepository(private val context: Context) {
                 battery = payload.battery,
                 isCharging = payload.isCharging,
                 localTimestamp = payload.localTimestamp,
-                status = "PENDING"
+                status = "PENDING",
+                eventId = payload.eventId,
+                clientId = payload.clientId
             )
-            dao.insert(entity)
+            val rowId = dao.insert(entity)
             dao.trimOldestIfOverLimit()
-            Timber.d("Data lokasi disimpan di Room DB")
+            Timber.d("Data lokasi disimpan di Room DB (rowId=$rowId)")
+            rowId
         } catch (e: Exception) {
             Timber.e(e, "Gagal menyimpan ke Room DB")
+            -1L
+        }
+    }
+
+    suspend fun markAsSent(roomId: Long) {
+        try {
+            dao.markAsSent(roomId)
+        } catch (e: Exception) {
+            Timber.e(e, "Gagal menandai data Room sebagai SENT")
         }
     }
 
@@ -128,7 +140,7 @@ class FirestoreRepository(private val context: Context) {
      */
     suspend fun syncPendingFromRoom() {
         if (!isFirebaseAvailable) return
-        
+
         val pending = dao.getAllPending()
         if (pending.isEmpty()) {
             Timber.d("Tidak ada data pending di Room DB")
@@ -157,22 +169,24 @@ class FirestoreRepository(private val context: Context) {
                     battery = item.battery,
                     isCharging = item.isCharging,
                     localTimestamp = item.localTimestamp,
-                    source = "offline_sync"
+                    source = "offline_sync",
+                    eventId = item.eventId.ifEmpty { item.id.toString() },
+                    clientId = item.clientId.ifEmpty { item.id.toString() }
                 )
-                
+
                 fs.collection("locations")
-                    .add(payload.toFirestoreMap())
+                    .document(item.id.toString())
+                    .set(payload.toFirestoreMap())
                     .await()
-                
+
                 dao.markAsSent(item.id)
                 Timber.d("Sync berhasil untuk item ID ${item.id}")
             } catch (e: Exception) {
                 Timber.e(e, "Gagal sync item ID ${item.id}. Menghentikan loop.")
-                break // Hentikan jika terjadi error koneksi di tengah jalan
+                break
             }
         }
 
-        // Bersihkan data yang sudah terkirim
         try {
             dao.deleteSent()
         } catch (e: Exception) {
