@@ -12,8 +12,15 @@ class PrefsManager(private val context: Context) {
 
     companion object {
         private const val KEY_TRACKING_ENABLED = "tracking_enabled"
-        private const val KEY_LAST_LATITUDE = "last_latitude"
-        private const val KEY_LAST_LONGITUDE = "last_longitude"
+
+        // Key lama (Float, buggy) — hanya untuk migrasi baca
+        private const val KEY_LAST_LATITUDE_LEGACY = "last_latitude"
+        private const val KEY_LAST_LONGITUDE_LEGACY = "last_longitude"
+
+        // Key baru (Long bits, presisi penuh Double)
+        private const val KEY_LAST_LATITUDE_BITS = "last_latitude_bits"
+        private const val KEY_LAST_LONGITUDE_BITS = "last_longitude_bits"
+
         private const val KEY_LAST_TIMESTAMP = "last_timestamp"
         private const val KEY_LAST_DOC_ID = "last_doc_id"
         private const val KEY_LAST_MANDATORY_SENT = "last_mandatory_sent"
@@ -31,18 +38,40 @@ class PrefsManager(private val context: Context) {
 
     fun saveLastSentLocation(latitude: Double, longitude: Double, timestamp: Long) {
         prefs.edit()
-            .putFloat(KEY_LAST_LATITUDE, latitude.toFloat())
-            .putFloat(KEY_LAST_LONGITUDE, longitude.toFloat())
+            // Simpan sebagai Long bits — presisi penuh Double tanpa kehilangan digit
+            .putLong(KEY_LAST_LATITUDE_BITS, java.lang.Double.doubleToRawLongBits(latitude))
+            .putLong(KEY_LAST_LONGITUDE_BITS, java.lang.Double.doubleToRawLongBits(longitude))
             .putLong(KEY_LAST_TIMESTAMP, timestamp)
+            // Hapus key lama agar tidak membingungkan saat dibaca
+            .remove(KEY_LAST_LATITUDE_LEGACY)
+            .remove(KEY_LAST_LONGITUDE_LEGACY)
             .apply()
     }
 
     fun getLastSentLocation(): Triple<Double, Double, Long>? {
-        if (!prefs.contains(KEY_LAST_LATITUDE)) return null
-        val lat = prefs.getFloat(KEY_LAST_LATITUDE, 0f).toDouble()
-        val lng = prefs.getFloat(KEY_LAST_LONGITUDE, 0f).toDouble()
-        val time = prefs.getLong(KEY_LAST_TIMESTAMP, 0L)
-        return Triple(lat, lng, time)
+        return when {
+            // Prioritas 1: baca dari key baru (Long bits, presisi penuh)
+            prefs.contains(KEY_LAST_LATITUDE_BITS) -> {
+                val latBits = prefs.getLong(KEY_LAST_LATITUDE_BITS, 0L)
+                val lngBits = prefs.getLong(KEY_LAST_LONGITUDE_BITS, 0L)
+                val time    = prefs.getLong(KEY_LAST_TIMESTAMP, 0L)
+                Triple(
+                    java.lang.Double.longBitsToDouble(latBits),
+                    java.lang.Double.longBitsToDouble(lngBits),
+                    time
+                )
+            }
+            // Prioritas 2: migrasi dari key lama (Float) — untuk user yang sudah install
+            // Data ini kurang presisi, tapi lebih baik daripada tidak ada sama sekali
+            prefs.contains(KEY_LAST_LATITUDE_LEGACY) -> {
+                val lat  = prefs.getFloat(KEY_LAST_LATITUDE_LEGACY, 0f).toDouble()
+                val lng  = prefs.getFloat(KEY_LAST_LONGITUDE_LEGACY, 0f).toDouble()
+                val time = prefs.getLong(KEY_LAST_TIMESTAMP, 0L)
+                Triple(lat, lng, time)
+            }
+            // Belum pernah simpan lokasi
+            else -> null
+        }
     }
 
     fun getUserName(): String? {

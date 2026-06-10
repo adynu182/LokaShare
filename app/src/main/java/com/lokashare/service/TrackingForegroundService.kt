@@ -192,6 +192,7 @@ class TrackingForegroundService : Service() {
 
         if (shouldSend || mandatoryDue) {
             val battery = BatteryHelper.getBatteryStatus(this)
+            val eventId = "${deviceId}_${timeNow}"
             val payload = LocationDataModel(
                 deviceId = deviceId,
                 userName = userName,
@@ -202,7 +203,8 @@ class TrackingForegroundService : Service() {
                 battery = battery.percentage,
                 isCharging = battery.isCharging,
                 localTimestamp = timeNow,
-                source = "online"
+                source = "online",
+                eventId = eventId
             )
 
             val online = NetworkMonitor.isOnline(this)

@@ -70,7 +70,11 @@ class FirestoreRepository(private val context: Context) {
             }
 
             val fs = firestore ?: throw IllegalStateException("Firestore unavailable")
-            val docId = roomId?.toString() ?: payload.eventId
+            val docId = if (roomId != null) {
+              "${payload.deviceId}_${roomId}"
+            } else {
+              payload.eventId 
+            }
 
             if (overwriteLastDoc) {
                 val lastDocId = prefs.getLastSentDocId()
@@ -175,7 +179,7 @@ class FirestoreRepository(private val context: Context) {
                 )
 
                 fs.collection("locations")
-                    .document(item.id.toString())
+                    .document("${item.deviceId}_${item.id}")
                     .set(payload.toFirestoreMap())
                     .await()
 

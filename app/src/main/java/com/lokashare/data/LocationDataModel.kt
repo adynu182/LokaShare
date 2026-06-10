@@ -14,7 +14,7 @@ data class LocationDataModel(
     val localTimestamp: Long,
     val source: String,             // "online" | "offline_sync"
     val appVersion: String = "1.0.0",
-    val eventId: String = UUID.randomUUID().toString(),
+    val eventId: String,
     val clientId: String = eventId
 ) {
     fun toFirestoreMap(): Map<String, Any> {
