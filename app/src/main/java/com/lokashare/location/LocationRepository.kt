@@ -84,9 +84,9 @@ class LocationRepository(private val context: Context) {
             return null
         }
 
-        try {
+        return try {
             withTimeout(GPS_STRICT_TIMEOUT_MS) {
-                suspendCancellableCoroutine { continuation ->
+                suspendCancellableCoroutine<Location?> { continuation ->
                     val listener = object : LocationListener {
                         override fun onLocationChanged(location: Location) {
                             locationManager.removeUpdates(this)
