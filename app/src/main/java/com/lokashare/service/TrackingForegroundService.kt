@@ -173,18 +173,27 @@ class TrackingForegroundService : Service() {
         val lastMandatory = prefs.getLastMandatorySent()
         val mandatoryDue = (timeNow - lastMandatory) >= MANDATORY_INTERVAL_MS
 
-        // Deduplikasi: skip jika sangat baru dikirim kecuali mandatory
+        // Deduplikasi: SELALU skip jika < 5 menit dari pengiriman terakhir,
+        // termasuk saat mandatory — tidak ada gunanya update data yang baru dikirim.
         if (lastSent != null) {
             val (_, _, lastTs) = lastSent
-            if (timeNow - lastTs < MIN_TIME_DELTA_MS && !mandatoryDue) {
-                Timber.d("Data sudah dikirim <5 menit lalu. Skip.")
+            if (timeNow - lastTs < MIN_TIME_DELTA_MS) {
+                Timber.d("Data sudah dikirim <5 menit lalu. Skip (mandatory=$mandatoryDue).")
                 return
             }
         }
 
         if (isMoving || mandatoryDue) {
             val battery = BatteryHelper.getBatteryStatus(this)
-            val eventId = "${deviceId}_${timeNow}"
+
+            // Untuk update stasioner (mandatory, tidak bergerak): gunakan kembali
+            // doc ID terakhir agar Firestore OVERWRITE, bukan buat dokumen baru.
+            // Untuk pergerakan: selalu buat doc baru dengan eventId unik.
+            val eventId = if (!isMoving && mandatoryDue) {
+                prefs.getLastSentDocId() ?: "${deviceId}_${timeNow}"
+            } else {
+                "${deviceId}_${timeNow}"
+            }
             val payload = LocationDataModel(
                 deviceId = deviceId,
                 userName = userName,

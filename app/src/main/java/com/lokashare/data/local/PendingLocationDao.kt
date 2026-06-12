@@ -25,4 +25,9 @@ interface PendingLocationDao {
 
     @Query("SELECT COUNT(*) FROM pending_locations WHERE status = 'PENDING'")
     fun getPendingCountFlow(): kotlinx.coroutines.flow.Flow<Int>
+
+    // Hapus entry pending dengan eventId tertentu — dipakai untuk upsert
+    // saat update stasioner mandatory agar tidak ada duplikat di antrian offline.
+    @Query("DELETE FROM pending_locations WHERE eventId = :eventId AND status = 'PENDING'")
+    suspend fun deletePendingByEventId(eventId: String)
 }

@@ -105,14 +105,24 @@ class FirestoreRepository(private val context: Context) {
     }
 
     /**
-     * Simpan data ke antrian lokal (offline queue)
+     * Simpan data ke antrian lokal (offline queue).
+     * Juga menyimpan eventId sebagai lastSentDocId agar update stasioner
+     * berikutnya bisa meng-overwrite entri ini (bukan membuat baru).
      */
     suspend fun saveToRoom(payload: LocationDataModel): Long {
         return try {
+            // Hapus entri PENDING dengan eventId yang sama jika ada
+            // (terjadi saat update stasioner mandatory offline berulang kali)
+            dao.deletePendingByEventId(payload.eventId)
+
             val entity = PendingLocationEntity.fromPayload(payload)
             val rowId = dao.insert(entity)
             dao.trimOldestIfOverLimit()
-            Timber.d("Data lokasi disimpan di Room DB (rowId=$rowId)")
+
+            // Simpan eventId sebagai referensi untuk stationary overwrite berikutnya
+            prefs.saveLastSentDocId(payload.eventId)
+
+            Timber.d("Data lokasi disimpan di Room DB (rowId=\$rowId, eventId=\${payload.eventId})")
             rowId
         } catch (e: Exception) {
             Timber.e(e, "Gagal menyimpan ke Room DB")
