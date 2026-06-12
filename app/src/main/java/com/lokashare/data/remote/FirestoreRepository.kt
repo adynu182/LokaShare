@@ -3,7 +3,9 @@ package com.lokashare.data.remote
 import android.content.Context
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.GeoPoint
 import com.lokashare.data.LocationDataModel
 import com.lokashare.data.local.PendingLocationDao
 import com.lokashare.data.local.PendingLocationEntity
@@ -33,65 +35,64 @@ class FirestoreRepository(private val context: Context) {
         get() = if (isFirebaseAvailable) FirebaseAuth.getInstance() else null
 
     /**
-     * Pastikan user terautentikasi secara anonim agar mematuhi Security Rules
+     * Pastikan user terautentikasi dan token masih valid.
      */
     private suspend fun ensureAuthenticated(): Boolean {
         val authInstance = auth ?: return false
-        if (authInstance.currentUser != null) return true
-
-        return try {
-            authInstance.signInAnonymously().await()
-            Timber.d("Autentikasi Anonim Berhasil")
-            true
-        } catch (e: Exception) {
-            Timber.e(e, "Gagal Autentikasi Anonim")
-            false
+        val user = authInstance.currentUser
+        
+        return if (user != null) {
+            try {
+                user.getIdToken(true).await() // Force refresh token
+                true
+            } catch (e: Exception) {
+                Timber.w("Token refresh gagal, mencoba sign-in ulang")
+                try {
+                    authInstance.signInAnonymously().await()
+                    authInstance.currentUser != null
+                } catch (re: Exception) {
+                    Timber.e(re, "Gagal re-autentikasi anonim")
+                    false
+                }
+            }
+        } else {
+            try {
+                authInstance.signInAnonymously().await()
+                Timber.d("Autentikasi Anonim Berhasil")
+                true
+            } catch (e: Exception) {
+                Timber.e(e, "Gagal Autentikasi Anonim")
+                false
+            }
         }
     }
 
     /**
-     * Kirim data langsung saat online
+     * Kirim data langsung saat online.
+     * Menggunakan eventId secara konsisten sebagai document ID.
      */
     suspend fun sendDirect(
         payload: LocationDataModel,
-        overwriteLastDoc: Boolean = false,
-        roomId: Long? = null
+        isStationary: Boolean = false
     ): Boolean {
-        if (!isFirebaseAvailable) {
-            Timber.w("Firebase tidak terinisialisasi. Menyimpan ke Room.")
-            return false
-        }
+        if (!isFirebaseAvailable) return false
 
         return try {
             val authenticated = ensureAuthenticated()
-            if (!authenticated) {
-                Timber.w("Gagal autentikasi ke Firebase. Menyimpan ke Room.")
-                return false
-            }
+            if (!authenticated) return false
 
             val fs = firestore ?: throw IllegalStateException("Firestore unavailable")
-            val docId = if (roomId != null) {
-              "${payload.deviceId}_${roomId}"
-            } else {
-              payload.eventId 
-            }
+            
+            // SELALU gunakan eventId sebagai docId untuk menghindari duplikasi/overwrite acak
+            val docId = payload.eventId
 
-            if (overwriteLastDoc) {
-                val lastDocId = prefs.getLastSentDocId()
-                if (!lastDocId.isNullOrEmpty()) {
-                    fs.collection("locations")
-                        .document(lastDocId)
-                        .set(payload.toFirestoreMap())
-                        .await()
-                    prefs.saveLastSentDocId(lastDocId)
-                    Timber.d("Data lokasi menimpa dokumen Firestore: $lastDocId")
-                    return true
-                }
-            }
+            // Jika stasioner, kita tetap kirim dokumen baru tetapi dengan flag stationary
+            // Ini lebih baik daripada menimpa dokumen lama agar history tetap terjaga
+            val finalPayload = if (isStationary) payload.copy(isStationary = true) else payload
 
             fs.collection("locations")
                 .document(docId)
-                .set(payload.toFirestoreMap())
+                .set(finalPayload.toFirestoreMap())
                 .await()
 
             prefs.saveLastSentDocId(docId)
@@ -108,19 +109,7 @@ class FirestoreRepository(private val context: Context) {
      */
     suspend fun saveToRoom(payload: LocationDataModel): Long {
         return try {
-            val entity = PendingLocationEntity(
-                deviceId = payload.deviceId,
-                userName = payload.userName,
-                latitude = payload.latitude,
-                longitude = payload.longitude,
-                accuracy = payload.accuracy,
-                battery = payload.battery,
-                isCharging = payload.isCharging,
-                localTimestamp = payload.localTimestamp,
-                status = "PENDING",
-                eventId = payload.eventId,
-                clientId = payload.clientId
-            )
+            val entity = PendingLocationEntity.fromPayload(payload)
             val rowId = dao.insert(entity)
             dao.trimOldestIfOverLimit()
             Timber.d("Data lokasi disimpan di Room DB (rowId=$rowId)")
@@ -131,63 +120,38 @@ class FirestoreRepository(private val context: Context) {
         }
     }
 
-    suspend fun markAsSent(roomId: Long) {
-        try {
-            dao.markAsSent(roomId)
-        } catch (e: Exception) {
-            Timber.e(e, "Gagal menandai data Room sebagai SENT")
-        }
-    }
-
     /**
-     * Sinkronisasi data pending dari Room ke Firestore
+     * Sinkronisasi data pending dari Room ke Firestore menggunakan WriteBatch
      */
     suspend fun syncPendingFromRoom() {
         if (!isFirebaseAvailable) return
 
         val pending = dao.getAllPending()
-        if (pending.isEmpty()) {
-            Timber.d("Tidak ada data pending di Room DB")
-            return
-        }
-
-        Timber.d("Memulai sinkronisasi ${pending.size} data pending dari Room...")
+        if (pending.isEmpty()) return
 
         val authenticated = ensureAuthenticated()
-        if (!authenticated) {
-            Timber.w("Gagal autentikasi untuk sinkronisasi. Dibatalkan.")
-            return
-        }
+        if (!authenticated) return
 
         val fs = firestore ?: return
+        
+        Timber.d("Memulai sinkronisasi ${pending.size} data pending via WriteBatch...")
 
-        for (item in pending) {
+        // Proses dalam chunk 400 (limit Firestore adalah 500 per batch)
+        pending.chunked(400).forEach { chunk ->
             try {
-                val payload = LocationDataModel(
-                    deviceId = item.deviceId,
-                    userName = item.userName,
-                    deviceModel = prefs.getDeviceModel(),
-                    latitude = item.latitude,
-                    longitude = item.longitude,
-                    accuracy = item.accuracy,
-                    battery = item.battery,
-                    isCharging = item.isCharging,
-                    localTimestamp = item.localTimestamp,
-                    source = "offline_sync",
-                    eventId = item.eventId.ifEmpty { item.id.toString() },
-                    clientId = item.clientId.ifEmpty { item.id.toString() }
-                )
-
-                fs.collection("locations")
-                    .document("${item.deviceId}_${item.id}")
-                    .set(payload.toFirestoreMap())
-                    .await()
-
-                dao.markAsSent(item.id)
-                Timber.d("Sync berhasil untuk item ID ${item.id}")
+                val batch = fs.batch()
+                chunk.forEach { item ->
+                    val docRef = fs.collection("locations").document(item.eventId)
+                    batch.set(docRef, item.toPayload().toFirestoreMap())
+                }
+                
+                batch.commit().await()
+                
+                chunk.forEach { dao.markAsSent(it.id) }
+                Timber.d("Batch sync berhasil untuk ${chunk.size} item")
             } catch (e: Exception) {
-                Timber.e(e, "Gagal sync item ID ${item.id}. Menghentikan loop.")
-                break
+                Timber.e(e, "Gagal sync batch. Sinkronisasi dihentikan.")
+                return@forEach
             }
         }
 
@@ -196,5 +160,17 @@ class FirestoreRepository(private val context: Context) {
         } catch (e: Exception) {
             Timber.e(e, "Gagal menghapus data tersinkronisasi dari Room")
         }
+    }
+
+    /**
+     * Extension function untuk konversi LocationDataModel ke Map Firestore.
+     * Memasukkan GeoPoint dan serverTimestamp di layer repository.
+     */
+    private fun LocationDataModel.toFirestoreMap(): Map<String, Any> {
+        return this.toMap() + mapOf(
+            "geopoint" to GeoPoint(latitude, longitude),
+            "timestamp" to FieldValue.serverTimestamp(),
+            "source" to if (source == "offline_sync") "OFFLINE_SYNC" else source
+        )
     }
 }

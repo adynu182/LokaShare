@@ -1,15 +1,18 @@
 package com.lokashare.service
 
 import android.app.Service
+import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.location.Location
 import android.os.IBinder
 import com.lokashare.data.LocationDataModel
 import com.lokashare.data.remote.FirestoreRepository
+import com.lokashare.location.GnssStatusManager
 import com.lokashare.location.LocationRepository
-import com.lokashare.receiver.NetworkChangeReceiver
 import com.lokashare.receiver.RestartReceiver
 import com.lokashare.util.BatteryHelper
 import com.lokashare.util.DistanceCalculator
@@ -34,52 +37,56 @@ class TrackingForegroundService : Service() {
     private lateinit var locationRepo: LocationRepository
     private lateinit var firestoreRepo: FirestoreRepository
     private lateinit var prefs: PrefsManager
-    private var networkReceiver: NetworkChangeReceiver? = null
+    private lateinit var gnssManager: GnssStatusManager
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            Timber.d("Koneksi internet tersedia, memulai sync pending...")
+            scope.launch { firestoreRepo.syncPendingFromRoom() }
+        }
+    }
 
     companion object {
         const val THRESHOLD_METERS = 200f
         const val CHECK_INTERVAL_MS = 5 * 60 * 1000L // 5 menit
         const val MANDATORY_INTERVAL_MS = 60 * 60 * 1000L // 60 menit
-        const val ACCURACY_THRESHOLD = 20f // kirim jika akurasi <= 20m
         const val MIN_TIME_DELTA_MS = 5 * 60 * 1000L // 5 menit deduplikasi
+        
+        @Volatile var isRunning: Boolean = false
+            private set
     }
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         locationRepo = LocationRepository(applicationContext)
         firestoreRepo = FirestoreRepository(applicationContext)
         prefs = PrefsManager(applicationContext)
+        gnssManager = GnssStatusManager(applicationContext)
 
-        // Inisialisasi Notification Channel
+        gnssManager.register()
         NotifHelper.createNotificationChannel(applicationContext)
 
-        // Daftarkan NetworkChangeReceiver secara programatik (API 24+)
-        try {
-            networkReceiver = NetworkChangeReceiver()
-            val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION)
-            registerReceiver(networkReceiver, filter)
-            Timber.d("NetworkChangeReceiver terdaftar di Service")
-        } catch (e: Exception) {
-            Timber.e(e, "Gagal mendaftarkan NetworkChangeReceiver")
-        }
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        cm.registerNetworkCallback(request, networkCallback)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Timber.d("TrackingForegroundService dijalankan...")
-
-        // Mulai Foreground dengan Notifikasi
         startForeground(NotifHelper.NOTIF_ID, NotifHelper.build(this))
 
-        // Jalankan loop pelacakan di coroutine
         scope.launch {
             startTrackingLoop()
         }
 
-        return START_STICKY // OS akan me-restart service jika ter-kill
+        return START_STICKY
     }
 
     private suspend fun startTrackingLoop() {
-        while (true) {
+        while (isRunning) {
             kotlin.coroutines.coroutineContext.ensureActive()
             try {
                 checkAndSend()
@@ -90,6 +97,9 @@ class TrackingForegroundService : Service() {
         }
     }
 
+    /**
+     * Logika pengambilan lokasi yang lebih cerdas dan efisien.
+     */
     private suspend fun checkAndSend() {
         val userName = prefs.getUserName() ?: "Unknown User"
         val deviceId = prefs.getDeviceId()
@@ -97,100 +107,82 @@ class TrackingForegroundService : Service() {
 
         Timber.d("Mengambil lokasi terbaru untuk $userName ($deviceModel)...")
         
-        // Penyimpanan sementara untuk semua percobaan
         val allAttempts = mutableListOf<Location>()
         var selectedLoc: Location? = null
+        var source = "UNKNOWN"
 
-        Timber.d("=== TAHAP 1: 5 percobaan dengan prioritas GPS ketat ===")
-        for (attempt in 1..5) {
-            val currentLoc = if (attempt == 1) {
-                locationRepo.getCurrentLocationFromGps()
-            } else {
-                locationRepo.getCurrentLocation()
+        // Strategi: Coba GPS strict 1x, lalu Fused 2x
+        // Total budget waktu pengambilan lokasi dikurangi agar tidak memblokir thread terlalu lama
+        
+        // 1. Coba GPS Ketat
+        val gpsLoc = locationRepo.getCurrentLocationFromGps()
+        if (gpsLoc != null) {
+            allAttempts.add(gpsLoc)
+            if (locationRepo.meetsStrictCriteria(gpsLoc, gnssManager.satellitesUsed)) {
+                selectedLoc = gpsLoc
+                source = "GPS"
+                Timber.d("✓ Lokasi GPS memenuhi kriteria ketat")
             }
+        }
 
-            if (currentLoc != null) {
-                allAttempts.add(currentLoc)
-                Timber.d("Percobaan $attempt: akurasi = ${currentLoc.accuracy}m, provider = ${currentLoc.provider}, age = ${System.currentTimeMillis() - currentLoc.time}ms")
-
-                if (attempt == 1) {
-                    if (locationRepo.meetsStrictCriteria(currentLoc)) {
-                        selectedLoc = currentLoc
-                        Timber.d("✓ Percobaan 1 - lokasi GPS memenuhi kriteria ketat")
+        // 2. Fallback Fused if needed
+        if (selectedLoc == null) {
+            for (i in 1..2) {
+                val fusedLoc = locationRepo.getCurrentLocation()
+                if (fusedLoc != null) {
+                    allAttempts.add(fusedLoc)
+                    if (fusedLoc.accuracy < 25f) {
+                        selectedLoc = fusedLoc
+                        source = "FUSED"
+                        Timber.d("✓ Lokasi Fused akurat (<25m)")
                         break
                     }
-                    Timber.w("Percobaan 1 - lokasi GPS gagal memenuhi kriteria ketat, lanjut ke fallback")
-                } else if (currentLoc.accuracy < 20f) {
-                    selectedLoc = currentLoc
-                    Timber.d("✓ Percobaan $attempt - akurasi < 20m, hentikan pencarian")
-                    break
                 }
-            } else {
-                Timber.w("Percobaan $attempt: gagal mendapatkan lokasi")
-            }
-
-            if (attempt < 5) {
-                delay(5_000L)
+                if (i < 2) delay(5000L)
             }
         }
 
+        // 3. Best effort fallback
         if (selectedLoc == null && allAttempts.isNotEmpty()) {
             selectedLoc = allAttempts.minByOrNull { it.accuracy }
-            Timber.w("✗ Semua percobaan gagal. FALLBACK: Menggunakan akurasi terbaik (${selectedLoc?.accuracy}m)")
+            source = selectedLoc?.provider?.uppercase(Locale.getDefault()) ?: "FALLBACK"
+            Timber.w("✗ Semua kriteria gagal. FALLBACK: Akurasi terbaik (${selectedLoc?.accuracy}m)")
         }
         
-        // Jika tidak ada lokasi sama sekali
         if (selectedLoc == null) {
-            Timber.w("✗ FATAL: Tidak ada lokasi yang berhasil diambil dalam 20 percobaan total.")
-            NotifHelper.updateNotification(
-                this,
-                "Terakhir cek: Gagal mendapatkan lokasi yang memadai pada ${getCurrentTimeString()}"
-            )
+            Timber.w("✗ Gagal mendapatkan lokasi apapun.")
+            NotifHelper.updateNotification(this, "Terakhir cek: Gagal mendapatkan lokasi (${getCurrentTimeString()})")
             return
         }
 
         val loc: Location = selectedLoc
-        Timber.d("Lokasi terpilih: akurasi = ${loc.accuracy}m, lat = ${loc.latitude}, lng = ${loc.longitude}")
-
         val lastSent = prefs.getLastSentLocation()
-        var distance = 0f
-        var shouldSend = false
         val timeNow = System.currentTimeMillis()
+        
+        var distance = 0f
+        var isMoving = false
 
         if (lastSent == null) {
-            shouldSend = true
-            Timber.d("Lokasi pertama kali dideteksi, langsung kirim.")
+            isMoving = true
         } else {
             val (lastLat, lastLng, _) = lastSent
-            distance = DistanceCalculator.distanceBetween(
-                lastLat, lastLng,
-                loc.latitude, loc.longitude
-            )
-            Timber.d("Jarak bergeser: ${distance}m dari posisi sebelumnya.")
-            if (distance > THRESHOLD_METERS) {
-                shouldSend = true
-            }
+            distance = DistanceCalculator.distanceBetween(lastLat, lastLng, loc.latitude, loc.longitude)
+            if (distance > THRESHOLD_METERS) isMoving = true
         }
 
-        // Cek apakah sudah waktunya pengiriman wajib 60 menit
         val lastMandatory = prefs.getLastMandatorySent()
         val mandatoryDue = (timeNow - lastMandatory) >= MANDATORY_INTERVAL_MS
 
-        // Cek deduplikasi waktu: jika data sebelumnya dikirim kurang dari 5 menit lalu, skip kecuali pengiriman wajib
+        // Deduplikasi: skip jika sangat baru dikirim kecuali mandatory
         if (lastSent != null) {
             val (_, _, lastTs) = lastSent
-            val delta = timeNow - lastTs
-            if (delta < MIN_TIME_DELTA_MS && !mandatoryDue) {
-                Timber.d("Data terakhir dikirim $delta ms lalu (<5 menit). Skip untuk menghindari double.")
-                NotifHelper.updateNotification(
-                    this,
-                    "Posisi tidak berubah dalam 5 menit terakhir | Cek terakhir: ${getCurrentTimeString()}"
-                )
+            if (timeNow - lastTs < MIN_TIME_DELTA_MS && !mandatoryDue) {
+                Timber.d("Data sudah dikirim <5 menit lalu. Skip.")
                 return
             }
         }
 
-        if (shouldSend || mandatoryDue) {
+        if (isMoving || mandatoryDue) {
             val battery = BatteryHelper.getBatteryStatus(this)
             val eventId = "${deviceId}_${timeNow}"
             val payload = LocationDataModel(
@@ -203,91 +195,62 @@ class TrackingForegroundService : Service() {
                 battery = battery.percentage,
                 isCharging = battery.isCharging,
                 localTimestamp = timeNow,
-                source = "online",
+                ageMs = timeNow - loc.time,
+                satellitesUsed = gnssManager.satellitesUsed,
+                source = source,
+                isStationary = !isMoving && mandatoryDue,
                 eventId = eventId
             )
 
             val online = NetworkMonitor.isOnline(this)
-            var overwriteLastDoc = false
-            if (mandatoryDue && lastSent != null) {
-                val (lastLat, lastLng, _) = lastSent
-                distance = DistanceCalculator.distanceBetween(
-                    lastLat, lastLng,
-                    loc.latitude, loc.longitude
-                )
-                if (distance < THRESHOLD_METERS) {
-                    overwriteLastDoc = true
-                }
-            }
+            var success = false
 
-            val roomId = firestoreRepo.saveToRoom(payload)
-            val success = if (online) {
-                val ok = firestoreRepo.sendDirect(payload, overwriteLastDoc, roomId = roomId)
-                if (ok) {
-                    firestoreRepo.markAsSent(roomId)
+            if (online) {
+                success = firestoreRepo.sendDirect(payload, isStationary = !isMoving && mandatoryDue)
+                if (success) {
                     firestoreRepo.syncPendingFromRoom()
+                } else {
+                    // Gagal kirim walau online -> simpan ke Room
+                    firestoreRepo.saveToRoom(payload)
                 }
-                ok
             } else {
-                true
+                // Offline -> simpan ke Room
+                firestoreRepo.saveToRoom(payload)
+                success = true // Dianggap sukses antri
             }
 
             if (success) {
                 prefs.saveLastSentLocation(loc.latitude, loc.longitude, timeNow)
-                if (mandatoryDue) {
-                    prefs.saveLastMandatorySent(timeNow)
-                }
-                Timber.d("State lastSentLocation diperbarui.")
+                if (mandatoryDue) prefs.saveLastMandatorySent(timeNow)
             }
 
-            val statusText = if (online) "Online (Firestore)" else "Offline (Room DB)"
+            val statusText = if (online && success) "Online" else if (!online) "Offline (Queued)" else "Retry Queued"
             NotifHelper.updateNotification(
                 this,
-                "Lokasi dikirim ($statusText) | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}"
+                "Lokasi $statusText | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}"
             )
         } else {
-            Timber.d("Posisi tidak bergerak signifikan (< 200m). Jarak: ${distance}m. Skip kirim.")
-            NotifHelper.updateNotification(
-                this,
-                "Posisi tidak bergerak signifikan | Cek terakhir: ${getCurrentTimeString()}"
-            )
+            NotifHelper.updateNotification(this, "Posisi stasioner | Cek terakhir: ${getCurrentTimeString()}")
         }
     }
 
     private fun getCurrentTimeString(): String {
-        val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
-        return sdf.format(Date())
+        return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        Timber.w("Aplikasi di-swipe dari Recents Menu!")
-        
-        // Kirim siaran untuk me-restart service jika pelacakan diaktifkan
         if (prefs.isTrackingEnabled()) {
-            val restartIntent = Intent(this, RestartReceiver::class.java).apply {
-                action = "ACTION_RESTART_TRACKING"
-            }
-            sendBroadcast(restartIntent)
+            sendBroadcast(Intent(this, RestartReceiver::class.java).apply { action = "ACTION_RESTART_TRACKING" })
         }
     }
 
     override fun onDestroy() {
-        Timber.d("TrackingForegroundService dihancurkan.")
-        
-        // Batalkan coroutine
+        isRunning = false
+        gnssManager.unregister()
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        try { cm.unregisterNetworkCallback(networkCallback) } catch (e: Exception) {}
         scope.cancel()
-
-        // Unregister NetworkChangeReceiver
-        try {
-            networkReceiver?.let {
-                unregisterReceiver(it)
-            }
-            Timber.d("NetworkChangeReceiver dinonaktifkan")
-        } catch (e: Exception) {
-            Timber.e(e, "Gagal me-unregister NetworkChangeReceiver")
-        }
-
         super.onDestroy()
     }
 

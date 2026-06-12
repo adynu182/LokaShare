@@ -616,7 +616,7 @@ fun TelemetryCoordinateCard(prefs: PrefsManager) {
     DisposableEffect(Unit) {
         val sharedPrefs = context.getSharedPreferences("lokashare_prefs", Context.MODE_PRIVATE)
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (key == "last_latitude" || key == "last_longitude") {
+            if (key == "last_latitude_bits" || key == "last_longitude_bits") {
                 lastSent = prefs.getLastSentLocation()
             }
         }

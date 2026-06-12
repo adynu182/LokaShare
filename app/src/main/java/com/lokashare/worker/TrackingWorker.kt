@@ -1,6 +1,5 @@
 package com.lokashare.worker
 
-import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
@@ -19,7 +18,7 @@ class TrackingWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
 
         Timber.d("TrackingWorker (Watchdog) berjalan...")
 
-        if (prefs.isTrackingEnabled() && !isServiceRunning(context, TrackingForegroundService::class.java)) {
+        if (prefs.isTrackingEnabled() && !TrackingForegroundService.isRunning) {
             Timber.w("Service mati tetapi status tracking AKTIF. Merestart service...")
             try {
                 val serviceIntent = Intent(context, TrackingForegroundService::class.java)
@@ -39,16 +38,5 @@ class TrackingWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         }
 
         return Result.success()
-    }
-
-    private fun isServiceRunning(context: Context, serviceClass: Class<*>): Boolean {
-        val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        @Suppress("DEPRECATION")
-        for (service in manager.getRunningServices(Int.MAX_VALUE)) {
-            if (serviceClass.name == service.service.className) {
-                return true
-            }
-        }
-        return false
     }
 }

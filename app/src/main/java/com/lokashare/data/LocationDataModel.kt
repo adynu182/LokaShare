@@ -1,7 +1,5 @@
 package com.lokashare.data
 
-import java.util.UUID
-
 data class LocationDataModel(
     val deviceId: String,
     val userName: String,
@@ -12,12 +10,14 @@ data class LocationDataModel(
     val battery: Int,
     val isCharging: Boolean,
     val localTimestamp: Long,
-    val source: String,             // "online" | "offline_sync"
-    val appVersion: String = "1.0.0",
-    val eventId: String,
-    val clientId: String = eventId
+    val ageMs: Long,
+    val satellitesUsed: Int,
+    val source: String,             // "GPS" | "FUSED" | "OFFLINE_SYNC"
+    val isStationary: Boolean = false,
+    val appVersion: String = "1.0.1",
+    val eventId: String
 ) {
-    fun toFirestoreMap(): Map<String, Any> {
+    fun toMap(): Map<String, Any> {
         return hashMapOf(
             "deviceId" to deviceId,
             "userName" to userName,
@@ -28,11 +28,12 @@ data class LocationDataModel(
             "battery" to battery,
             "isCharging" to isCharging,
             "localTimestamp" to localTimestamp,
-            "timestamp" to com.google.firebase.firestore.FieldValue.serverTimestamp(), // Firestore server-side timestamp
+            "ageMs" to ageMs,
+            "satellitesUsed" to satellitesUsed,
             "source" to source,
+            "isStationary" to isStationary,
             "appVersion" to appVersion,
-            "eventId" to eventId,
-            "clientId" to clientId
+            "eventId" to eventId
         )
     }
 }

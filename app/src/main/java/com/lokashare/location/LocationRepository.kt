@@ -7,14 +7,13 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
 import android.os.Looper
+import android.os.HandlerThread
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import timber.log.Timber
 import kotlin.coroutines.resume
@@ -22,6 +21,7 @@ import kotlin.coroutines.resume
 class LocationRepository(private val context: Context) {
 
     private val fusedClient = LocationServices.getFusedLocationProviderClient(context)
+    private val gpsThread = HandlerThread("GpsCallbackThread").also { it.start() }
 
     companion object {
         // Timeout untuk GPS ketat (percobaan 1): diberi waktu lebih lama
@@ -68,9 +68,9 @@ class LocationRepository(private val context: Context) {
      *     baik karena timeout, cancel coroutine, maupun exception
      */
     @SuppressLint("MissingPermission")
-    suspend fun getCurrentLocationFromGps(): Location? = withContext(Dispatchers.IO) {
+    suspend fun getCurrentLocationFromGps(): Location? {
         val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-            ?: return@withContext null
+            ?: return null
 
         // Cek dulu apakah GPS provider tersedia dan aktif
         val isGpsEnabled = try {
@@ -81,7 +81,7 @@ class LocationRepository(private val context: Context) {
 
         if (!isGpsEnabled) {
             Timber.w("GPS provider tidak aktif — skip percobaan GPS ketat")
-            return@withContext null
+            return null
         }
 
         try {
@@ -111,7 +111,7 @@ class LocationRepository(private val context: Context) {
                         locationManager.requestSingleUpdate(
                             LocationManager.GPS_PROVIDER,
                             listener,
-                            Looper.getMainLooper()
+                            gpsThread.looper
                         )
                     } catch (e: Exception) {
                         Timber.e(e, "Gagal mendaftarkan GPS listener")
@@ -137,17 +137,16 @@ class LocationRepository(private val context: Context) {
         }
     }
 
-    fun meetsStrictCriteria(location: Location): Boolean {
+    fun meetsStrictCriteria(location: Location, satellitesUsed: Int): Boolean {
         val ageMs = System.currentTimeMillis() - location.time
         val ageSeconds = ageMs / 1000L
         val providerMatches = location.provider?.equals(LocationManager.GPS_PROVIDER, ignoreCase = true) == true
-        val satelliteCount = location.extras?.getInt("satellites", -1) ?: -1
-        val speedJumpNormal = location.speed <= 15f
+        val speedJumpNormal = location.speed <= 5f
 
         return location.accuracy < 10f &&
             ageSeconds < 10L &&
             providerMatches &&
-            satelliteCount > 8 &&
+            satellitesUsed > 8 &&
             speedJumpNormal
     }
 }
