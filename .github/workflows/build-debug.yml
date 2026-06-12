@@ -20,13 +20,13 @@ jobs:
       # 1. Checkout kode
       # ─────────────────────────────────────────
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ─────────────────────────────────────────
       # 2. Setup JDK 17 (sesuai build.gradle.kts)
       # ─────────────────────────────────────────
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -55,7 +55,7 @@ jobs:
       #    (mempercepat build berikutnya)
       # ─────────────────────────────────────────
       - name: Cache Gradle packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.gradle/caches
@@ -77,7 +77,7 @@ jobs:
       #    (bisa didownload dari tab Actions)
       # ─────────────────────────────────────────
       - name: Upload APK Debug artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: LokaShare-debug-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
@@ -91,4 +91,4 @@ jobs:
         run: |
           APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
           SIZE=$(du -sh "$APK" | cut -f1)
-          echo "✅ APK Debug berhasil dibuild: $APK ($SIZE)"
+          echo "APK Debug berhasil dibuild: $APK ($SIZE)"
