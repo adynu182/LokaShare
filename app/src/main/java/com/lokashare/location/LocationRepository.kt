@@ -31,31 +31,36 @@ class LocationRepository(private val context: Context) {
         // Timeout untuk Fused (percobaan 2–5): lebih singkat karena
         // fused bisa langsung pakai Cell/WiFi jika GPS belum siap
         private const val FUSED_TIMEOUT_MS = 10_000L        // 10 detik
+        private const val LOW_POWER_TIMEOUT_MS = 5_000L     // 5 detik
     }
 
-    /**
-     * Ambil lokasi via FusedLocationProvider (balanced accuracy).
-     * Dipakai untuk percobaan 2–5 di checkAndSend().
-     * Dilindungi timeout [FUSED_TIMEOUT_MS] — tidak akan hang.
-     */
     @SuppressLint("MissingPermission")
-    suspend fun getCurrentLocation(): Location? {
+    private suspend fun getFusedLocation(priority: Int, timeoutMs: Long): Location? {
+        var cts: CancellationTokenSource? = null
         return try {
-            withTimeout(FUSED_TIMEOUT_MS) {
-                val cts = CancellationTokenSource()
-                val location = fusedClient.getCurrentLocation(
-                    Priority.PRIORITY_BALANCED_POWER_ACCURACY,
-                    cts.token
-                ).await()
-                location
+            withTimeout(timeoutMs) {
+                cts = CancellationTokenSource()
+                fusedClient.getCurrentLocation(priority, cts!!.token).await()
             }
         } catch (e: TimeoutCancellationException) {
-            Timber.w("Fused location timeout setelah ${FUSED_TIMEOUT_MS}ms — kembalikan null")
+            try { cts?.cancel() } catch (_: Exception) { }
+            Timber.w("Fused location timeout setelah ${timeoutMs}ms — kembalikan null")
             null
         } catch (e: Exception) {
+            try { cts?.cancel() } catch (_: Exception) { }
             Timber.e(e, "Gagal mengambil lokasi dari Fused Location")
             null
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    suspend fun getCurrentLocation(): Location? {
+        return getFusedLocation(Priority.PRIORITY_BALANCED_POWER_ACCURACY, FUSED_TIMEOUT_MS)
+    }
+
+    @SuppressLint("MissingPermission")
+    suspend fun getLowPowerLocation(): Location? {
+        return getFusedLocation(Priority.PRIORITY_LOW_POWER, LOW_POWER_TIMEOUT_MS)
     }
 
     /**
@@ -146,7 +151,20 @@ class LocationRepository(private val context: Context) {
         return location.accuracy < 10f &&
             ageSeconds < 10L &&
             providerMatches &&
-            satellitesUsed > 8 &&
+            satellitesUsed > 3 &&
             speedJumpNormal
+    }
+
+    /**
+     * Cleanup resources: hentikan GPS handler thread.
+     * Panggil ini ketika repository tidak lagi digunakan.
+     */
+    fun cleanup() {
+        try {
+            gpsThread.quitSafely()
+            Timber.d("GPS thread handler dibersihkan")
+        } catch (e: Exception) {
+            Timber.e(e, "Gagal cleanup GPS thread")
+        }
     }
 }

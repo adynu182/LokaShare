@@ -119,9 +119,6 @@ class FirestoreRepository(private val context: Context) {
             val rowId = dao.insert(entity)
             dao.trimOldestIfOverLimit()
 
-            // Simpan eventId sebagai referensi untuk stationary overwrite berikutnya
-            prefs.saveLastSentDocId(payload.eventId)
-
             Timber.d("Data lokasi disimpan di Room DB (rowId=\$rowId, eventId=\${payload.eventId})")
             rowId
         } catch (e: Exception) {
@@ -132,6 +129,7 @@ class FirestoreRepository(private val context: Context) {
 
     /**
      * Sinkronisasi data pending dari Room ke Firestore menggunakan WriteBatch
+     * Terus berusaha meski ada error di satu chunk — jangan hentikan sinkronisasi seluruhnya.
      */
     suspend fun syncPendingFromRoom() {
         if (!isFirebaseAvailable) return
@@ -146,6 +144,7 @@ class FirestoreRepository(private val context: Context) {
         
         Timber.d("Memulai sinkronisasi ${pending.size} data pending via WriteBatch...")
 
+        var errorCount = 0
         // Proses dalam chunk 400 (limit Firestore adalah 500 per batch)
         pending.chunked(400).forEach { chunk ->
             try {
@@ -160,8 +159,9 @@ class FirestoreRepository(private val context: Context) {
                 chunk.forEach { dao.markAsSent(it.id) }
                 Timber.d("Batch sync berhasil untuk ${chunk.size} item")
             } catch (e: Exception) {
-                Timber.e(e, "Gagal sync batch. Sinkronisasi dihentikan.")
-                return@forEach
+                errorCount++
+                Timber.e(e, "Gagal sync batch #$errorCount. Lanjut ke chunk berikutnya...")
+                // Terus loop ke chunk berikutnya, jangan stop sinkronisasi seluruhnya
             }
         }
 
@@ -169,6 +169,10 @@ class FirestoreRepository(private val context: Context) {
             dao.deleteSent()
         } catch (e: Exception) {
             Timber.e(e, "Gagal menghapus data tersinkronisasi dari Room")
+        }
+
+        if (errorCount > 0) {
+            Timber.w("Sinkronisasi selesai dengan $errorCount batch error")
         }
     }
 
