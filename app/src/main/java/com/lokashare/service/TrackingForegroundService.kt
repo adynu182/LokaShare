@@ -219,9 +219,10 @@ class TrackingForegroundService : Service() {
             Timber.w("✗ Semua kriteria gagal. FALLBACK: Akurasi terbaik (${selectedLoc?.accuracy}m)")
             
             // Recalculate motion jika fallback location digunakan
-            if (lastSent != null) {
+            val fallbackLoc = selectedLoc
+            if (lastSent != null && fallbackLoc != null) {
                 val (lastLat, lastLng, _) = lastSent
-                distance = DistanceCalculator.distanceBetween(lastLat, lastLng, selectedLoc.latitude, selectedLoc.longitude)
+                distance = DistanceCalculator.distanceBetween(lastLat, lastLng, fallbackLoc.latitude, fallbackLoc.longitude)
                 if (distance > THRESHOLD_METERS) {
                     isMoving = true
                 }

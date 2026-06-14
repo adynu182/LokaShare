@@ -17,6 +17,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
@@ -228,6 +229,9 @@ fun LokaShareApp(
     }
 
     // Permission request launcher
+    // Ref holder diperlukan agar launcher bisa direferensikan dari dalam callback-nya sendiri
+    val fineLocationLauncherRef = remember { mutableStateOf<ActivityResultLauncher<Array<String>>?>(null) }
+
     val fineLocationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -244,7 +248,7 @@ fun LokaShareApp(
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !activityGranted) {
             Toast.makeText(context, "Aplikasi membutuhkan izin Activity Recognition untuk optimasi baterai", Toast.LENGTH_SHORT).show()
-            fineLocationLauncher.launch(arrayOf(Manifest.permission.ACTIVITY_RECOGNITION))
+            fineLocationLauncherRef.value?.launch(arrayOf(Manifest.permission.ACTIVITY_RECOGNITION))
             return@rememberLauncherForActivityResult
         }
 
@@ -265,6 +269,8 @@ fun LokaShareApp(
             onStartService()
         }
     }
+    // Assign ref setelah launcher dibuat agar callback dapat menggunakannya
+    fineLocationLauncherRef.value = fineLocationLauncher
 
     // Background Location request launcher (Android 10+)
     val bgLocationLauncher = rememberLauncherForActivityResult(

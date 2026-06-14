@@ -12,7 +12,7 @@ import timber.log.Timber
 class ActivityRecognitionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (ActivityRecognitionResult.hasResult(intent)) {
-            val result = ActivityRecognitionResult.extractResult(intent)
+            val result = ActivityRecognitionResult.extractResult(intent) ?: return
             val detectedActivity = result.mostProbableActivity
             val activityType = detectedActivity.type
             val confidence = detectedActivity.confidence
