@@ -6,6 +6,9 @@ on:
       - 'v*.*.*'           # Trigger otomatis saat push tag seperti v1.0.0
   workflow_dispatch:       # Bisa di-trigger manual dari GitHub UI
 
+permissions:
+  contents: write   # Wajib untuk membuat GitHub Release
+
 jobs:
   build-and-release:
     name: Build & Release APK
