@@ -18,3 +18,7 @@ local.properties
 *.jks
 *.keystore
 app/google-services.json
+
+# Local icon pack sources
+/android icon pack/
+
