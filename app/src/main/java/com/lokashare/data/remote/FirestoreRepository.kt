@@ -11,6 +11,8 @@ import com.lokashare.data.local.PendingLocationDao
 import com.lokashare.data.local.PendingLocationEntity
 import com.lokashare.data.local.TrackingDatabase
 import com.lokashare.util.PrefsManager
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import timber.log.Timber
 
@@ -19,6 +21,12 @@ class FirestoreRepository(private val context: Context) {
     private val db: TrackingDatabase = TrackingDatabase.getInstance(context)
     private val dao: PendingLocationDao = db.pendingLocationDao()
     private val prefs = PrefsManager(context)
+
+    // Mutex untuk mencegah race condition: NetworkCallback, loop 5 menit, dan
+    // TrackingWorker watchdog bisa memanggil syncPendingFromRoom() bersamaan.
+    // Dengan tryLock(), panggilan yang datang saat sync sedang berjalan langsung
+    // dilewati — sync yang berjalan sudah mencakup semua data pending.
+    private val syncMutex = Mutex()
 
     private val isFirebaseAvailable: Boolean
         get() = try {
@@ -128,51 +136,68 @@ class FirestoreRepository(private val context: Context) {
     }
 
     /**
-     * Sinkronisasi data pending dari Room ke Firestore menggunakan WriteBatch
+     * Sinkronisasi data pending dari Room ke Firestore menggunakan WriteBatch.
      * Terus berusaha meski ada error di satu chunk — jangan hentikan sinkronisasi seluruhnya.
+     *
+     * Menggunakan [syncMutex].tryLock() untuk mencegah race condition:
+     * jika sync sudah berjalan di coroutine lain (dipicu NetworkCallback, loop 5 menit,
+     * atau TrackingWorker secara bersamaan), panggilan berikutnya langsung dilewati.
+     * Sync yang sedang berjalan sudah akan mencakup seluruh data pending yang ada.
      */
     suspend fun syncPendingFromRoom() {
         if (!isFirebaseAvailable) return
 
-        val pending = dao.getAllPending()
-        if (pending.isEmpty()) return
-
-        val authenticated = ensureAuthenticated()
-        if (!authenticated) return
-
-        val fs = firestore ?: return
-        
-        Timber.d("Memulai sinkronisasi ${pending.size} data pending via WriteBatch...")
-
-        var errorCount = 0
-        // Proses dalam chunk 400 (limit Firestore adalah 500 per batch)
-        pending.chunked(400).forEach { chunk ->
-            try {
-                val batch = fs.batch()
-                chunk.forEach { item ->
-                    val docRef = fs.collection("locations").document(item.eventId)
-                    batch.set(docRef, item.toPayload().toFirestoreMap())
-                }
-                
-                batch.commit().await()
-                
-                chunk.forEach { dao.markAsSent(it.id) }
-                Timber.d("Batch sync berhasil untuk ${chunk.size} item")
-            } catch (e: Exception) {
-                errorCount++
-                Timber.e(e, "Gagal sync batch #$errorCount. Lanjut ke chunk berikutnya...")
-                // Terus loop ke chunk berikutnya, jangan stop sinkronisasi seluruhnya
-            }
+        // Jika sync sedang berjalan di coroutine lain, skip — jangan antri.
+        // Data pending saat ini sudah ditangani oleh sync yang sedang berjalan.
+        if (!syncMutex.tryLock()) {
+            Timber.d("syncPendingFromRoom() dipanggil bersamaan — sync sudah berjalan, panggilan ini diskip.")
+            return
         }
 
         try {
-            dao.deleteSent()
-        } catch (e: Exception) {
-            Timber.e(e, "Gagal menghapus data tersinkronisasi dari Room")
-        }
+            val pending = dao.getAllPending()
+            if (pending.isEmpty()) return
 
-        if (errorCount > 0) {
-            Timber.w("Sinkronisasi selesai dengan $errorCount batch error")
+            val authenticated = ensureAuthenticated()
+            if (!authenticated) return
+
+            val fs = firestore ?: return
+
+            Timber.d("Memulai sinkronisasi ${pending.size} data pending via WriteBatch...")
+
+            var errorCount = 0
+            // Proses dalam chunk 400 (limit Firestore adalah 500 per batch)
+            pending.chunked(400).forEach { chunk ->
+                try {
+                    val batch = fs.batch()
+                    chunk.forEach { item ->
+                        val docRef = fs.collection("locations").document(item.eventId)
+                        batch.set(docRef, item.toPayload().toFirestoreMap())
+                    }
+
+                    batch.commit().await()
+
+                    chunk.forEach { dao.markAsSent(it.id) }
+                    Timber.d("Batch sync berhasil untuk ${chunk.size} item")
+                } catch (e: Exception) {
+                    errorCount++
+                    Timber.e(e, "Gagal sync batch #$errorCount. Lanjut ke chunk berikutnya...")
+                    // Terus loop ke chunk berikutnya, jangan stop sinkronisasi seluruhnya
+                }
+            }
+
+            try {
+                dao.deleteSent()
+            } catch (e: Exception) {
+                Timber.e(e, "Gagal menghapus data tersinkronisasi dari Room")
+            }
+
+            if (errorCount > 0) {
+                Timber.w("Sinkronisasi selesai dengan $errorCount batch error")
+            }
+        } finally {
+            // Selalu lepas lock — baik selesai normal, early return, maupun exception
+            syncMutex.unlock()
         }
     }
 

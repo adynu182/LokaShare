@@ -13,3 +13,8 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Sensitive files — jangan di-commit!
+*.jks
+*.keystore
+app/google-services.json
