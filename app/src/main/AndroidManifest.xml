@@ -11,7 +11,6 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 
     <application
         android:allowBackup="true"
@@ -56,11 +55,6 @@
                 <action android:name="ACTION_RESTART_TRACKING" />
             </intent-filter>
         </receiver>
-
-        <!-- Activity Recognition Receiver -->
-        <receiver
-            android:name=".receiver.ActivityRecognitionReceiver"
-            android:exported="false" />
 
     </application>
 

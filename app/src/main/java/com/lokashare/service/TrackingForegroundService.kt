@@ -15,8 +15,6 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.lokashare.data.LocationDataModel
 import com.lokashare.data.remote.FirestoreRepository
-import com.google.android.gms.location.DetectedActivity
-import com.lokashare.location.ActivityRecognitionManager
 import com.lokashare.location.GnssStatusManager
 import com.lokashare.location.LocationRepository
 import com.lokashare.receiver.RestartReceiver
@@ -44,7 +42,6 @@ class TrackingForegroundService : Service() {
     private lateinit var firestoreRepo: FirestoreRepository
     private lateinit var prefs: PrefsManager
     private lateinit var gnssManager: GnssStatusManager
-    private lateinit var activityRecognitionManager: ActivityRecognitionManager
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -72,12 +69,6 @@ class TrackingForegroundService : Service() {
         gnssManager = GnssStatusManager(applicationContext)
 
         gnssManager.register()
-        activityRecognitionManager = ActivityRecognitionManager(applicationContext)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-            ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED
-        ) {
-            scope.launch { activityRecognitionManager.start() }
-        }
         NotifHelper.createNotificationChannel(applicationContext)
 
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -111,13 +102,12 @@ class TrackingForegroundService : Service() {
     }
 
     /**
-     * Logika pengambilan lokasi yang lebih cerdas dan efisien dengan ActivityRecognition.
+     * Logika pelacakan berdasarkan jarak dan mode (MOVING/STATIONARY).
      * Alur:
-     * 1. Early exit jika ActivityRecognition deteksi STILL dan tidak ada mandatory update
-     * 2. Early exit jika <5 menit dari pengiriman terakhir dan tidak ada mandatory update
-     * 3. Ambil low-power location dulu → balanced fused → GPS strict (hanya jika perlu)
-     * 4. Tentukan motion berdasarkan jarak dari posisi terakhir
-     * 5. Kirim atau antri sesuai koneksi
+     * 1. Tentukan motion berdasarkan jarak dari posisi terakhir (>200m = moving)
+     * 2. Jika MOVING: catat setiap 5 menit jika distance >200m
+     * 3. Jika STATIONARY: kirim satu record pertama kali, update setiap 60 menit
+     * 4. Gunakan eventId sama per periode stasioner untuk overwrite (hemat storage)
      */
     private suspend fun checkAndSend() {
         val userName = prefs.getUserName() ?: "Unknown User"
@@ -128,32 +118,15 @@ class TrackingForegroundService : Service() {
         
         val lastSent = prefs.getLastSentLocation()
         val timeNow = System.currentTimeMillis()
-        val lastMandatory = prefs.getLastMandatorySent()
-        val mandatoryDue = (timeNow - lastMandatory) >= MANDATORY_INTERVAL_MS
-        
-        // 1. Early exit: ActivityRecognition STILL + tidak ada mandatory update
-        val activityState = prefs.getLastDetectedActivity()
-        val isProbablyStill = activityState?.let { it.first == DetectedActivity.STILL && it.second >= 75 } == true
-        
-        if (isProbablyStill && lastSent != null && !mandatoryDue) {
-            Timber.d("ActivityRecognition: STILL (confidence >= 75%). Skip lokasi untuk interval ini.")
-            return
-        }
-
-        // 2. Early exit: deduplikasi 5 menit + tidak ada mandatory update
-        if (lastSent != null && !mandatoryDue) {
-            val (_, _, lastTs) = lastSent
-            if (timeNow - lastTs < MIN_TIME_DELTA_MS) {
-                Timber.d("Data sudah dikirim <5 menit lalu dan tidak ada mandatory update. Skip.")
-                return
-            }
-        }
+        val lastMode = prefs.getLastMode() // "MOVING" atau "STATIONARY"
+        val lastStationarySentTime = prefs.getLastStationarySentTime()
+        val lastStationaryDocId = prefs.getLastStationaryDocId()
 
         val allAttempts = mutableListOf<Location>()
         var selectedLoc: Location? = null
         var source = "UNKNOWN"
 
-        // 3. Ambil low-power fused dulu untuk hemat baterai
+        // Ambil low-power fused dulu untuk hemat baterai
         val lowPowerLoc = locationRepo.getLowPowerLocation()
         if (lowPowerLoc != null) {
             allAttempts.add(lowPowerLoc)
@@ -164,7 +137,7 @@ class TrackingForegroundService : Service() {
             }
         }
 
-        // 4. Jika low-power belum cukup, coba balanced fused
+        // Jika low-power belum cukup, coba balanced fused
         val fusedLoc = if (selectedLoc == null) {
             locationRepo.getCurrentLocation().also {
                 if (it != null) {
@@ -178,29 +151,28 @@ class TrackingForegroundService : Service() {
             }
         } else null
 
-        // 5. Tentukan motion berdasarkan kandidat lokasi terbaik sejauh ini
+        // Tentukan motion berdasarkan jarak dari lokasi terakhir
         val candidateLocForMotion = selectedLoc ?: fusedLoc ?: lowPowerLoc
         var distance = 0f
         var isMoving = false
         
         if (lastSent == null) {
+            // First send - tentukan dari akurasi lokasi dan perubahan yang ada
             isMoving = true
-            Timber.d("First location send - dianggap bergerak")
+            Timber.d("First location send - initialized as MOVING")
         } else if (candidateLocForMotion != null) {
             val (lastLat, lastLng, _) = lastSent
             distance = DistanceCalculator.distanceBetween(lastLat, lastLng, candidateLocForMotion.latitude, candidateLocForMotion.longitude)
-            if (distance > THRESHOLD_METERS) {
-                isMoving = true
+            isMoving = distance > THRESHOLD_METERS
+            if (isMoving) {
                 Timber.d("Motion detected: distance=${String.format("%.1f", distance)}m > threshold=$THRESHOLD_METERS")
             }
         }
 
-        // 6. Hanya gunakan GPS strict jika:
-        //    - low-power/fused tidak memadai AND
-        //    - (first send OR mandatory update OR motion detected OR allAttempts kosong)
-        val needsGpsStrict = selectedLoc == null && (lastSent == null || mandatoryDue || isMoving || allAttempts.isEmpty())
+        // Hanya gunakan GPS strict untuk first send atau saat bergerak jika diperlukan
+        val needsGpsStrict = selectedLoc == null && (lastSent == null || isMoving || allAttempts.isEmpty())
         if (needsGpsStrict) {
-            Timber.d("GPS strict diperlukan: selectedLoc=null, lastSent=$lastSent, mandatoryDue=$mandatoryDue, isMoving=$isMoving")
+            Timber.d("GPS strict diperlukan: selectedLoc=null, lastSent=$lastSent, isMoving=$isMoving")
             val gpsLoc = locationRepo.getCurrentLocationFromGps()
             if (gpsLoc != null) {
                 allAttempts.add(gpsLoc)
@@ -212,7 +184,7 @@ class TrackingForegroundService : Service() {
             }
         }
 
-        // 7. Best effort fallback jika tidak ada lokasi yang memenuhi threshold
+        // Best effort fallback jika tidak ada lokasi yang memenuhi threshold
         if (selectedLoc == null && allAttempts.isNotEmpty()) {
             selectedLoc = allAttempts.minByOrNull { it.accuracy }
             source = selectedLoc?.provider?.uppercase(Locale.getDefault()) ?: "FALLBACK"
@@ -223,9 +195,7 @@ class TrackingForegroundService : Service() {
             if (lastSent != null && fallbackLoc != null) {
                 val (lastLat, lastLng, _) = lastSent
                 distance = DistanceCalculator.distanceBetween(lastLat, lastLng, fallbackLoc.latitude, fallbackLoc.longitude)
-                if (distance > THRESHOLD_METERS) {
-                    isMoving = true
-                }
+                isMoving = distance > THRESHOLD_METERS
             }
         }
 
@@ -237,19 +207,40 @@ class TrackingForegroundService : Service() {
 
         val loc: Location = selectedLoc
 
-        // 8. Tentukan apakah perlu kirim data
-        if (isMoving || mandatoryDue) {
-            val battery = BatteryHelper.getBatteryStatus(this)
+        // Deteksi transisi mode
+        val currentMode = if (isMoving) "MOVING" else "STATIONARY"
+        val justTransitioned = currentMode != lastMode
 
-            // Untuk update stasioner (mandatory, tidak bergerak): gunakan kembali
-            // doc ID stationary terakhir agar Firestore OVERWRITE, bukan buat dokumen baru.
-            // Pisahkan dari regular movement untuk menghindari overwrite data movement dengan stationary.
-            // Untuk pergerakan: selalu buat doc baru dengan eventId unik.
-            val eventId = if (!isMoving && mandatoryDue) {
-                prefs.getLastStationaryDocId() ?: "${deviceId}_STATIONARY_${timeNow}"
-            } else {
-                "${deviceId}_${timeNow}"
+        val battery = BatteryHelper.getBatteryStatus(this)
+
+        if (currentMode == "MOVING") {
+            // MODE MOVING: Catat setiap 5 menit jika distance > 200m
+            if (justTransitioned) {
+                // Transisi dari STATIONARY ke MOVING
+                Timber.d("Transisi: STATIONARY → MOVING")
+                prefs.clearLastStationaryDocId()
+                prefs.saveLastMode("MOVING")
             }
+
+            // Cek 5-menit cadence
+            if (lastSent != null) {
+                val (_, _, lastTs) = lastSent
+                if (timeNow - lastTs < MIN_TIME_DELTA_MS) {
+                    Timber.d("Skip: belum 5 menit sejak pengiriman terakhir (delta=${timeNow - lastTs}ms)")
+                    NotifHelper.updateNotification(this, "Bergerak | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
+                    return
+                }
+            }
+
+            // Cek jarak threshold
+            if (distance <= THRESHOLD_METERS) {
+                Timber.d("Skip: jarak <200m (distance=$distance)")
+                NotifHelper.updateNotification(this, "Bergerak (dekat) | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
+                return
+            }
+
+            // Kirim movement record
+            val eventId = "${deviceId}_${timeNow}"
             val payload = LocationDataModel(
                 deviceId = deviceId,
                 userName = userName,
@@ -263,42 +254,96 @@ class TrackingForegroundService : Service() {
                 ageMs = timeNow - loc.time,
                 satellitesUsed = gnssManager.satellitesUsed,
                 source = source,
-                isStationary = !isMoving && mandatoryDue,
+                isStationary = false,
                 eventId = eventId
             )
 
-            val online = NetworkMonitor.isOnline(this)
-            var success = false
+            sendAndPersist(payload)
+            NotifHelper.updateNotification(this, "Bergerak (kirim) | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
 
-            if (online) {
-                success = firestoreRepo.sendDirect(payload, isStationary = !isMoving && mandatoryDue)
-                if (success) {
-                    firestoreRepo.syncPendingFromRoom()
+        } else {
+            // MODE STATIONARY: Kirim pertama kali, update setiap 60 menit
+            if (justTransitioned) {
+                // Transisi dari MOVING ke STATIONARY: kirim satu record segera
+                Timber.d("Transisi: MOVING → STATIONARY")
+                val newStationaryDocId = "${deviceId}_STATIONARY_${timeNow}"
+                val payload = LocationDataModel(
+                    deviceId = deviceId,
+                    userName = userName,
+                    deviceModel = deviceModel,
+                    latitude = loc.latitude,
+                    longitude = loc.longitude,
+                    accuracy = loc.accuracy,
+                    battery = battery.percentage,
+                    isCharging = battery.isCharging,
+                    localTimestamp = timeNow,
+                    ageMs = timeNow - loc.time,
+                    satellitesUsed = gnssManager.satellitesUsed,
+                    source = source,
+                    isStationary = true,
+                    eventId = newStationaryDocId
+                )
+
+                sendAndPersist(payload)
+                prefs.saveLastStationaryDocId(newStationaryDocId)
+                prefs.saveLastStationarySentTime(timeNow)
+                prefs.saveLastMode("STATIONARY")
+                
+                NotifHelper.updateNotification(this, "Diam (tercatat) | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
+
+            } else {
+                // Sudah STATIONARY: cek apakah perlu update setelah 60 menit
+                if (timeNow - lastStationarySentTime >= MANDATORY_INTERVAL_MS) {
+                    // Update dengan eventId yang sama (overwrite)
+                    Timber.d("Update stationary setelah 60 menit")
+                    val payload = LocationDataModel(
+                        deviceId = deviceId,
+                        userName = userName,
+                        deviceModel = deviceModel,
+                        latitude = loc.latitude,
+                        longitude = loc.longitude,
+                        accuracy = loc.accuracy,
+                        battery = battery.percentage,
+                        isCharging = battery.isCharging,
+                        localTimestamp = timeNow,
+                        ageMs = timeNow - loc.time,
+                        satellitesUsed = gnssManager.satellitesUsed,
+                        source = source,
+                        isStationary = true,
+                        eventId = lastStationaryDocId ?: "${deviceId}_STATIONARY_${timeNow}"
+                    )
+
+                    sendAndPersist(payload)
+                    prefs.saveLastStationarySentTime(timeNow)
+                    
+                    NotifHelper.updateNotification(this, "Diam (update 60m) | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
                 } else {
-                    firestoreRepo.saveToRoom(payload)
+                    // Skip: belum 60 menit
+                    Timber.d("Skip: masih diam, belum 60 menit (delta=${timeNow - lastStationarySentTime}ms)")
+                    NotifHelper.updateNotification(this, "Diam | Cek terakhir: ${getCurrentTimeString()}")
                 }
+            }
+        }
+    }
+
+    private suspend fun sendAndPersist(payload: LocationDataModel) {
+        val online = NetworkMonitor.isOnline(this)
+        var success = false
+
+        if (online) {
+            success = firestoreRepo.sendDirect(payload, isStationary = payload.isStationary)
+            if (success) {
+                firestoreRepo.syncPendingFromRoom()
             } else {
                 firestoreRepo.saveToRoom(payload)
-                success = true
             }
-
-            if (success) {
-                prefs.saveLastSentLocation(loc.latitude, loc.longitude, timeNow)
-                if (mandatoryDue) {
-                    prefs.saveLastMandatorySent(timeNow)
-                    if (!isMoving) {
-                        prefs.saveLastStationaryDocId(eventId)
-                    }
-                }
-            }
-
-            val statusText = if (online && success) "Online" else if (!online) "Offline (Queued)" else "Retry Queued"
-            NotifHelper.updateNotification(
-                this,
-                "Lokasi $statusText | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}"
-            )
         } else {
-            NotifHelper.updateNotification(this, "Posisi stasioner | Cek terakhir: ${getCurrentTimeString()}")
+            firestoreRepo.saveToRoom(payload)
+            success = true
+        }
+
+        if (success) {
+            prefs.saveLastSentLocation(payload.latitude, payload.longitude, System.currentTimeMillis())
         }
     }
 
@@ -317,7 +362,6 @@ class TrackingForegroundService : Service() {
         isRunning = false
         gnssManager.unregister()
         locationRepo.cleanup()
-        scope.launch { activityRecognitionManager.stop() }
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         try { cm.unregisterNetworkCallback(networkCallback) } catch (e: Exception) {}
         scope.cancel()

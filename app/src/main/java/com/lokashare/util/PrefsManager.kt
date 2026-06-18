@@ -26,6 +26,8 @@ class PrefsManager(private val context: Context) {
         private const val KEY_LAST_TIMESTAMP = "last_timestamp"
         private const val KEY_LAST_DOC_ID = "last_doc_id"
         private const val KEY_LAST_STATIONARY_DOC_ID = "last_stationary_doc_id"
+        private const val KEY_LAST_STATIONARY_SENT_TIME = "last_stationary_sent_time"
+        private const val KEY_LAST_MODE = "last_mode"
         private const val KEY_LAST_MANDATORY_SENT = "last_mandatory_sent"
         private const val KEY_LAST_ACTIVITY_TYPE = "last_activity_type"
         private const val KEY_LAST_ACTIVITY_CONFIDENCE = "last_activity_confidence"
@@ -130,6 +132,26 @@ class PrefsManager(private val context: Context) {
 
     fun getLastStationaryDocId(): String? {
         return prefs.getString(KEY_LAST_STATIONARY_DOC_ID, null)
+    }
+
+    fun clearLastStationaryDocId() {
+        prefs.edit().remove(KEY_LAST_STATIONARY_DOC_ID).apply()
+    }
+
+    fun saveLastStationarySentTime(timestamp: Long) {
+        prefs.edit().putLong(KEY_LAST_STATIONARY_SENT_TIME, timestamp).apply()
+    }
+
+    fun getLastStationarySentTime(): Long {
+        return prefs.getLong(KEY_LAST_STATIONARY_SENT_TIME, 0L)
+    }
+
+    fun saveLastMode(mode: String) {
+        prefs.edit().putString(KEY_LAST_MODE, mode).apply()
+    }
+
+    fun getLastMode(): String {
+        return prefs.getString(KEY_LAST_MODE, "MOVING") ?: "MOVING"
     }
 
     fun saveLastMandatorySent(timestamp: Long) {
