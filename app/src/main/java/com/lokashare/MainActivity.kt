@@ -237,18 +237,9 @@ fun LokaShareApp(
     ) { permissions ->
         val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
         val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-        val activityGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            permissions[Manifest.permission.ACTIVITY_RECOGNITION] == true
-        } else true
 
         if (!fineGranted && !coarseGranted) {
             Toast.makeText(context, "Aplikasi membutuhkan izin GPS untuk berfungsi", Toast.LENGTH_LONG).show()
-            return@rememberLauncherForActivityResult
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !activityGranted) {
-            Toast.makeText(context, "Aplikasi membutuhkan izin Activity Recognition untuk optimasi baterai", Toast.LENGTH_SHORT).show()
-            fineLocationLauncherRef.value?.launch(arrayOf(Manifest.permission.ACTIVITY_RECOGNITION))
             return@rememberLauncherForActivityResult
         }
 
@@ -455,25 +446,11 @@ fun LokaShareApp(
                         Manifest.permission.ACCESS_COARSE_LOCATION
                     ) == PackageManager.PERMISSION_GRANTED
 
-                    val hasActivity = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.ACTIVITY_RECOGNITION
-                        ) == PackageManager.PERMISSION_GRANTED
-                    } else true
-
                     if (!hasFine && !hasCoarse) {
                         fineLocationLauncher.launch(
                             arrayOf(
                                 Manifest.permission.ACCESS_FINE_LOCATION,
-                                Manifest.permission.ACCESS_COARSE_LOCATION,
-                                Manifest.permission.ACTIVITY_RECOGNITION
-                            )
-                        )
-                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !hasActivity) {
-                        fineLocationLauncher.launch(
-                            arrayOf(
-                                Manifest.permission.ACTIVITY_RECOGNITION
+                                Manifest.permission.ACCESS_COARSE_LOCATION
                             )
                         )
                     } else {

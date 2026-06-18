@@ -4,8 +4,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import android.provider.Settings
-import androidx.core.content.ContextCompat
-import com.google.android.gms.location.DetectedActivity
 import java.util.UUID
 
 class PrefsManager(private val context: Context) {
@@ -29,8 +27,6 @@ class PrefsManager(private val context: Context) {
         private const val KEY_LAST_STATIONARY_SENT_TIME = "last_stationary_sent_time"
         private const val KEY_LAST_MODE = "last_mode"
         private const val KEY_LAST_MANDATORY_SENT = "last_mandatory_sent"
-        private const val KEY_LAST_ACTIVITY_TYPE = "last_activity_type"
-        private const val KEY_LAST_ACTIVITY_CONFIDENCE = "last_activity_confidence"
         private const val KEY_USER_NAME = "user_name"
         private const val KEY_DEVICE_ID = "device_id"
     }
@@ -160,19 +156,5 @@ class PrefsManager(private val context: Context) {
 
     fun getLastMandatorySent(): Long {
         return prefs.getLong(KEY_LAST_MANDATORY_SENT, 0L)
-    }
-
-    fun saveLastDetectedActivity(type: Int, confidence: Int) {
-        prefs.edit()
-            .putInt(KEY_LAST_ACTIVITY_TYPE, type)
-            .putInt(KEY_LAST_ACTIVITY_CONFIDENCE, confidence)
-            .apply()
-    }
-
-    fun getLastDetectedActivity(): Pair<Int, Int>? {
-        return if (prefs.contains(KEY_LAST_ACTIVITY_TYPE) && prefs.contains(KEY_LAST_ACTIVITY_CONFIDENCE)) {
-            prefs.getInt(KEY_LAST_ACTIVITY_TYPE, DetectedActivity.UNKNOWN) to
-                prefs.getInt(KEY_LAST_ACTIVITY_CONFIDENCE, 0)
-        } else null
     }
 }
