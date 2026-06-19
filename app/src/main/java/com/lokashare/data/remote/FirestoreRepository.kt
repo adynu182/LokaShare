@@ -78,11 +78,10 @@ class FirestoreRepository(private val context: Context) {
     /**
      * Kirim data langsung saat online.
      * Menggunakan eventId secara konsisten sebagai document ID.
+     * payload.isStationary sudah di-set dengan benar di TrackingForegroundService
+     * sebelum dipassing ke sini — tidak perlu parameter terpisah.
      */
-    suspend fun sendDirect(
-        payload: LocationDataModel,
-        isStationary: Boolean = false
-    ): Boolean {
+    suspend fun sendDirect(payload: LocationDataModel): Boolean {
         if (!isFirebaseAvailable) return false
 
         return try {
@@ -94,13 +93,9 @@ class FirestoreRepository(private val context: Context) {
             // SELALU gunakan eventId sebagai docId untuk menghindari duplikasi/overwrite acak
             val docId = payload.eventId
 
-            // Jika stasioner, kita tetap kirim dokumen baru tetapi dengan flag stationary
-            // Ini lebih baik daripada menimpa dokumen lama agar history tetap terjaga
-            val finalPayload = if (isStationary) payload.copy(isStationary = true) else payload
-
             fs.collection("locations")
                 .document(docId)
-                .set(finalPayload.toFirestoreMap())
+                .set(payload.toFirestoreMap())
                 .await()
 
             prefs.saveLastSentDocId(docId)
@@ -209,7 +204,7 @@ class FirestoreRepository(private val context: Context) {
         return this.toMap() + mapOf(
             "geopoint" to GeoPoint(latitude, longitude),
             "timestamp" to FieldValue.serverTimestamp(),
-            "source" to if (source == "offline_sync") "OFFLINE_SYNC" else source
+            "source" to source
         )
     }
 }

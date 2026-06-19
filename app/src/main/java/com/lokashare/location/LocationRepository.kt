@@ -21,7 +21,11 @@ import kotlin.coroutines.resume
 class LocationRepository(private val context: Context) {
 
     private val fusedClient = LocationServices.getFusedLocationProviderClient(context)
-    private val gpsThread = HandlerThread("GpsCallbackThread").also { it.start() }
+
+    // HandlerThread dibuat nullable agar bisa direcreate setelah cleanup().
+    // HandlerThread yang sudah di-quitSafely() tidak bisa direstart —
+    // harus buat instance baru jika service di-toggle stop/start berkali-kali.
+    private var gpsThread: HandlerThread? = null
 
     companion object {
         // Timeout untuk GPS ketat (percobaan 1): diberi waktu lebih lama
@@ -32,6 +36,22 @@ class LocationRepository(private val context: Context) {
         // fused bisa langsung pakai Cell/WiFi jika GPS belum siap
         private const val FUSED_TIMEOUT_MS = 10_000L        // 10 detik
         private const val LOW_POWER_TIMEOUT_MS = 5_000L     // 5 detik
+    }
+
+    /**
+     * Mengembalikan Looper dari HandlerThread yang aktif.
+     * Jika thread belum dibuat atau sudah di-quit (zombie), buat instance baru.
+     * @Synchronized mencegah race condition jika ada dua coroutine yang
+     * secara bersamaan memanggil getCurrentLocationFromGps().
+     */
+    @Synchronized
+    private fun getOrCreateGpsLooper(): Looper {
+        val thread = gpsThread
+        if (thread == null || !thread.isAlive) {
+            Timber.d("Membuat GpsCallbackThread baru (thread sebelumnya: ${if (thread == null) "null" else "mati"})")
+            gpsThread = HandlerThread("GpsCallbackThread").also { it.start() }
+        }
+        return gpsThread!!.looper
     }
 
     @SuppressLint("MissingPermission")
@@ -116,7 +136,7 @@ class LocationRepository(private val context: Context) {
                         locationManager.requestSingleUpdate(
                             LocationManager.GPS_PROVIDER,
                             listener,
-                            gpsThread.looper
+                            getOrCreateGpsLooper()
                         )
                     } catch (e: Exception) {
                         Timber.e(e, "Gagal mendaftarkan GPS listener")
@@ -156,13 +176,15 @@ class LocationRepository(private val context: Context) {
     }
 
     /**
-     * Cleanup resources: hentikan GPS handler thread.
-     * Panggil ini ketika repository tidak lagi digunakan.
+     * Cleanup resources: hentikan GPS handler thread dan set null
+     * agar getOrCreateGpsLooper() bisa membuat instance baru jika
+     * service di-restart (toggle stop → start dari UI).
      */
     fun cleanup() {
         try {
-            gpsThread.quitSafely()
-            Timber.d("GPS thread handler dibersihkan")
+            gpsThread?.quitSafely()
+            gpsThread = null
+            Timber.d("GPS thread handler dibersihkan dan di-nullkan")
         } catch (e: Exception) {
             Timber.e(e, "Gagal cleanup GPS thread")
         }

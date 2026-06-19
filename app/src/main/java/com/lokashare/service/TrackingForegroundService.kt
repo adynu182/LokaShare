@@ -25,6 +25,7 @@ import com.lokashare.util.NotifHelper
 import com.lokashare.util.PrefsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -42,6 +43,8 @@ class TrackingForegroundService : Service() {
     private lateinit var firestoreRepo: FirestoreRepository
     private lateinit var prefs: PrefsManager
     private lateinit var gnssManager: GnssStatusManager
+    // Guard agar onStartCommand tidak meluncurkan dua tracking loop bersamaan
+    private var trackingJob: Job? = null
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -82,8 +85,13 @@ class TrackingForegroundService : Service() {
         Timber.d("TrackingForegroundService dijalankan...")
         startForeground(NotifHelper.NOTIF_ID, NotifHelper.build(this))
 
-        scope.launch {
-            startTrackingLoop()
+        // Cegah dua tracking loop berjalan paralel jika onStartCommand dipanggil ulang
+        if (trackingJob?.isActive == true) {
+            Timber.w("Tracking loop sudah aktif, skip launch baru")
+        } else {
+            trackingJob = scope.launch {
+                startTrackingLoop()
+            }
         }
 
         return START_STICKY
@@ -180,6 +188,14 @@ class TrackingForegroundService : Service() {
                     selectedLoc = gpsLoc
                     source = "GPS"
                     Timber.d("✓ Lokasi GPS memenuhi kriteria ketat")
+                    // Recalculate motion dari GPS yang lebih presisi.
+                    // candidateLocForMotion sebelumnya dari LOW_POWER/FUSED bisa berbeda jarak.
+                    if (lastSent != null) {
+                        val (lastLat, lastLng, _) = lastSent
+                        distance = DistanceCalculator.distanceBetween(lastLat, lastLng, gpsLoc.latitude, gpsLoc.longitude)
+                        isMoving = distance > THRESHOLD_METERS
+                        Timber.d("Motion recalculate dari GPS: distance=${String.format("%.1f", distance)}m, isMoving=$isMoving")
+                    }
                 }
             }
         }
@@ -250,13 +266,12 @@ class TrackingForegroundService : Service() {
             }
 
             // Cek 5-menit cadence
-            if (lastSent != null) {
-                val (_, _, lastTs) = lastSent
-                if (timeNow - lastTs < MIN_TIME_DELTA_MS) {
-                    Timber.d("Skip: belum 5 menit sejak pengiriman terakhir (delta=${timeNow - lastTs}ms)")
-                    NotifHelper.updateNotification(this, "Bergerak | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
-                    return
-                }
+            // lastSent tidak mungkin null di sini — sudah di-handle oleh early return "first-ever send" di atas
+            val (_, _, lastTs) = lastSent
+            if (timeNow - lastTs < MIN_TIME_DELTA_MS) {
+                Timber.d("Skip: belum 5 menit sejak pengiriman terakhir (delta=${timeNow - lastTs}ms)")
+                NotifHelper.updateNotification(this, "Bergerak | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
+                return
             }
 
             // Cek jarak threshold
@@ -358,7 +373,7 @@ class TrackingForegroundService : Service() {
         var success = false
 
         if (online) {
-            success = firestoreRepo.sendDirect(payload, isStationary = payload.isStationary)
+            success = firestoreRepo.sendDirect(payload)
             if (success) {
                 firestoreRepo.syncPendingFromRoom()
             } else {

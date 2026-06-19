@@ -11,6 +11,8 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Diperlukan di Android 13+ agar notifikasi foreground service tampil -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
@@ -38,9 +40,10 @@
             android:stopWithTask="false" />
 
         <!-- Boot Receiver -->
+        <!-- exported="true" wajib agar sistem bisa kirim BOOT_COMPLETED di semua vendor ROM -->
         <receiver
             android:name=".receiver.BootReceiver"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
