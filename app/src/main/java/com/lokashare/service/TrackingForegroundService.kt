@@ -221,6 +221,33 @@ class TrackingForegroundService : Service() {
                 prefs.clearLastStationaryDocId()
                 prefs.saveLastMode("MOVING")
             }
+            
+            // First-ever send: lastSent == null -> send immediately (no distance check)
+            if (lastSent == null) {
+                Timber.d("First-ever MOVING send (no previous lastSent). Sending initial record.")
+                val eventId = "${deviceId}_$timeNow"
+                val payload = LocationDataModel(
+                    deviceId = deviceId,
+                    userName = userName,
+                    deviceModel = deviceModel,
+                    latitude = loc.latitude,
+                    longitude = loc.longitude,
+                    accuracy = loc.accuracy,
+                    battery = battery.percentage,
+                    isCharging = battery.isCharging,
+                    localTimestamp = timeNow,
+                    ageMs = timeNow - loc.time,
+                    satellitesUsed = gnssManager.satellitesUsed,
+                    source = source,
+                    isStationary = false,
+                    eventId = eventId
+                )
+
+                sendAndPersist(payload)
+                prefs.saveLastMode("MOVING")
+                NotifHelper.updateNotification(this, "Bergerak (initial) | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
+                return
+            }
 
             // Cek 5-menit cadence
             if (lastSent != null) {
