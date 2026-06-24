@@ -66,9 +66,11 @@ class LocationRepository(private val context: Context) {
             try { cts?.cancel() } catch (_: Exception) { }
             Timber.w("Fused location timeout setelah ${timeoutMs}ms — kembalikan null")
             null
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Throwable (bukan Exception) agar NoSuchMethodError dari Play Services
+            // versi lama (Vivo/Huawei Android 9) tertangkap dan dikembalikan null.
             try { cts?.cancel() } catch (_: Exception) { }
-            Timber.e(e, "Gagal mengambil lokasi dari Fused Location")
+            Timber.e(e, "Gagal mengambil lokasi dari Fused Location (${e.javaClass.simpleName})")
             null
         }
     }
@@ -156,8 +158,8 @@ class LocationRepository(private val context: Context) {
         } catch (e: TimeoutCancellationException) {
             Timber.w("GPS fix timeout setelah ${GPS_STRICT_TIMEOUT_MS}ms — tidak ada sinyal GPS cukup kuat")
             null
-        } catch (e: Exception) {
-            Timber.e(e, "Error saat menunggu GPS fix")
+        } catch (e: Throwable) {
+            Timber.e(e, "Error saat menunggu GPS fix (${e.javaClass.simpleName})")
             null
         }
     }

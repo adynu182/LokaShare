@@ -102,8 +102,16 @@ class TrackingForegroundService : Service() {
             kotlin.coroutines.coroutineContext.ensureActive()
             try {
                 checkAndSend()
-            } catch (e: Exception) {
-                Timber.e(e, "Error di dalam loop pelacakan")
+            } catch (e: Throwable) {
+                // Tangkap Throwable (bukan hanya Exception) agar Error seperti
+                // NoSuchMethodError dari Play Services versi lama (Vivo/Huawei Android 9)
+                // tidak membunuh loop. Loop tetap jalan setiap 5 menit.
+                val hint = "${e.javaClass.simpleName}: ${e.message?.take(50) ?: "-"}"
+                Timber.e(e, "checkAndSend() error — loop tetap jalan. $hint")
+                NotifHelper.updateNotification(
+                    this,
+                    "Tracking error | Retry ${getCurrentTimeString()} | $hint"
+                )
             }
             delay(CHECK_INTERVAL_MS)
         }
@@ -118,6 +126,22 @@ class TrackingForegroundService : Service() {
      * 4. Gunakan eventId sama per periode stasioner untuk overwrite (hemat storage)
      */
     private suspend fun checkAndSend() {
+        // Verifikasi izin lokasi di setiap siklus.
+        // Menangani: (1) izin dicabut saat service sudah jalan,
+        // (2) OEM seperti Vivo/Xiaomi yang punya izin berlapis di luar Android standard.
+        val hasPermission = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasPermission) {
+            Timber.w("ACCESS_FINE_LOCATION tidak granted — skip checkAndSend()")
+            NotifHelper.updateNotification(
+                this,
+                "Izin lokasi tidak aktif | Buka app untuk mengaktifkan | ${getCurrentTimeString()}"
+            )
+            return
+        }
+
         val userName = prefs.getUserName() ?: "Unknown User"
         val deviceId = prefs.getDeviceId()
         val deviceModel = prefs.getDeviceModel()
