@@ -330,9 +330,27 @@ class TrackingForegroundService : Service() {
         } else {
             // MODE STATIONARY: Kirim pertama kali, update setiap 60 menit
             if (justTransitioned) {
-                // Transisi dari MOVING ke STATIONARY: kirim satu record segera
+                // Transisi dari MOVING ke STATIONARY
                 Timber.d("Transisi: MOVING → STATIONARY")
-                val newStationaryDocId = "${deviceId}_STATIONARY_${timeNow}"
+
+                // Cek apakah posisi STATIONARY baru terlalu dekat dengan titik MOVING terakhir.
+                // Jika jarak < THRESHOLD_METERS (200m) DAN dokumen terakhir adalah MOVING:
+                //   → Timpa dokumen MOVING terakhir dengan data STATIONARY terbaru.
+                //   → Mencegah penumpukan dua marker berdekatan di dashboard.
+                // Jika jarak >= THRESHOLD_METERS ATAU dokumen terakhir bukan MOVING:
+                //   → Buat dokumen STATIONARY baru seperti biasa.
+                val lastDocId = prefs.getLastSentDocId()
+                val lastDocIsMoving = lastDocId != null && !lastDocId.contains("_STATIONARY_")
+                val shouldOverwrite = lastDocIsMoving && distance < THRESHOLD_METERS
+
+                val stationaryDocId = if (shouldOverwrite) {
+                    Timber.d("Timpa dok MOVING ($lastDocId) → jarak ${String.format("%.1f", distance)}m < ${THRESHOLD_METERS}m")
+                    lastDocId!!
+                } else {
+                    Timber.d("Buat dok STATIONARY baru → jarak ${String.format("%.1f", distance)}m atau dok terakhir bukan MOVING")
+                    "${deviceId}_STATIONARY_${timeNow}"
+                }
+
                 val payload = LocationDataModel(
                     deviceId = deviceId,
                     userName = userName,
@@ -347,15 +365,16 @@ class TrackingForegroundService : Service() {
                     satellitesUsed = gnssManager.satellitesUsed,
                     source = source,
                     isStationary = true,
-                    eventId = newStationaryDocId
+                    eventId = stationaryDocId
                 )
 
                 sendAndPersist(payload)
-                prefs.saveLastStationaryDocId(newStationaryDocId)
+                prefs.saveLastStationaryDocId(stationaryDocId)
                 prefs.saveLastStationarySentTime(timeNow)
                 prefs.saveLastMode("STATIONARY")
-                
-                NotifHelper.updateNotification(this, "Diam (tercatat) | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
+
+                val notifSuffix = if (shouldOverwrite) "timpa" else "baru"
+                NotifHelper.updateNotification(this, "Diam (tercatat/$notifSuffix) | Akurasi: ${String.format("%.1f", loc.accuracy)}m | Bat: ${battery.percentage}% | ${getCurrentTimeString()}")
 
             } else {
                 // Sudah STATIONARY: cek apakah perlu update setelah 60 menit
@@ -406,6 +425,9 @@ class TrackingForegroundService : Service() {
         } else {
             firestoreRepo.saveToRoom(payload)
             success = true
+            // Simpan docId saat offline agar getLastSentDocId() tetap akurat
+            // meski belum tersinkronisasi ke Firestore — dibutuhkan logika overwrite STATIONARY
+            prefs.saveLastSentDocId(payload.eventId)
         }
 
         if (success) {
