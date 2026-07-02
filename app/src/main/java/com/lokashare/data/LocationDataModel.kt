@@ -14,7 +14,7 @@ data class LocationDataModel(
     val satellitesUsed: Int,
     val source: String,             // "GPS" | "FUSED" | "OFFLINE_SYNC"
     val isStationary: Boolean = false,
-    val appVersion: String = "1.2.1",
+    val appVersion: String = "1.2.2",
     val eventId: String
 ) {
     fun toMap(): Map<String, Any> {
